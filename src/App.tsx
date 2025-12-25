@@ -11,8 +11,13 @@ export function App() {
   };
 
   return (
-    <main style={{ width: "100vw", height: "100vh", margin: 0, padding: 0 }}>
-      <div ref={handleContainerRef} style={{ width: "100%", height: "100%" }} />
+    <main className="flex w-screen h-screen overflow-hidden">
+      <aside className="w-64 h-full shrink-0 bg-black/10" />
+      <div
+        ref={handleContainerRef}
+        className="flex-1 h-full min-w-0 overflow-hidden"
+      />
+      <aside className="w-64 h-full shrink-0 bg-black/10" />
     </main>
   );
 }

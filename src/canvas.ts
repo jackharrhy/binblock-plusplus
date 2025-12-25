@@ -16,7 +16,10 @@ let isDragging = false;
 let isShiftHeld = false;
 let lastPointerPosition = { x: 0, y: 0 };
 
-let currentGridInfo = { width: 0, height: 0, cellSize: 0 };
+let currentGridInfo = { width: 0, height: 0, cellSize: 0, cols: 0, rows: 0 };
+let lastScreenSize = { width: 0, height: 0 };
+let hasMovedView = false;
+let resizeObserver: ResizeObserver | null = null;
 
 export async function initCanvas(container: HTMLElement): Promise<Application> {
   if (app) {
@@ -36,14 +39,14 @@ export async function initCanvas(container: HTMLElement): Promise<Application> {
   sceneContainer = new Container();
   app.stage.addChild(sceneContainer);
 
-  setupPanZoom();
+  setupPanZoom(container);
   drawGrid(8, 8);
   setInitialView();
 
   return app;
 }
 
-function setupPanZoom(): void {
+function setupPanZoom(container: HTMLElement): void {
   if (!app || !sceneContainer) return;
 
   app.stage.eventMode = "static";
@@ -58,6 +61,42 @@ function setupPanZoom(): void {
 
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+
+  resizeObserver = new ResizeObserver(() => {
+    requestAnimationFrame(onResize);
+  });
+  resizeObserver.observe(container);
+
+  lastScreenSize = { width: app.screen.width, height: app.screen.height };
+}
+
+function onResize(): void {
+  if (!app || !sceneContainer) return;
+
+  const newWidth = app.screen.width;
+  const newHeight = app.screen.height;
+
+  if (!hasMovedView) {
+    drawGrid(currentGridInfo.cols, currentGridInfo.rows);
+    setInitialView();
+  } else {
+    const oldCenterX = lastScreenSize.width / 2;
+    const oldCenterY = lastScreenSize.height / 2;
+
+    const worldCenterX =
+      (oldCenterX - sceneContainer.x) / sceneContainer.scale.x;
+    const worldCenterY =
+      (oldCenterY - sceneContainer.y) / sceneContainer.scale.y;
+
+    const newCenterX = newWidth / 2;
+    const newCenterY = newHeight / 2;
+
+    sceneContainer.x = newCenterX - worldCenterX * sceneContainer.scale.x;
+    sceneContainer.y = newCenterY - worldCenterY * sceneContainer.scale.y;
+  }
+
+  lastScreenSize = { width: newWidth, height: newHeight };
+  app.stage.hitArea = app.screen;
 }
 
 function onKeyDown(event: KeyboardEvent): void {
@@ -101,6 +140,7 @@ function onDragMove(event: FederatedPointerEvent): void {
   sceneContainer.y += dy;
 
   lastPointerPosition = { x: event.global.x, y: event.global.y };
+  hasMovedView = true;
 }
 
 function onDragEnd(): void {
@@ -145,6 +185,8 @@ function onWheel(event: WheelEvent): void {
 
   sceneContainer.x = pointerX - worldPos.x * sceneContainer.scale.x;
   sceneContainer.y = pointerY - worldPos.y * sceneContainer.scale.y;
+
+  hasMovedView = true;
 }
 
 export function drawGrid(cols: number, rows: number): void {
@@ -164,7 +206,13 @@ export function drawGrid(cols: number, rows: number): void {
   const gridWidth = cellSize * cols;
   const gridHeight = cellSize * rows;
 
-  currentGridInfo = { width: gridWidth, height: gridHeight, cellSize };
+  currentGridInfo = {
+    width: gridWidth,
+    height: gridHeight,
+    cellSize,
+    cols,
+    rows,
+  };
 
   const offsetX = (screenWidth - gridWidth) / 2;
   const offsetY = (screenHeight - gridHeight) / 2;
@@ -181,7 +229,7 @@ export function drawGrid(cols: number, rows: number): void {
     gridGraphics.lineTo(offsetX + gridWidth, y);
   }
 
-  gridGraphics.stroke({ width: 1, color: 0x000000 });
+  gridGraphics.stroke({ width: 2, color: 0x000000, alpha: 0.15 });
 }
 
 function setInitialView(): void {
@@ -191,10 +239,14 @@ function setInitialView(): void {
   const screenHeight = app.screen.height;
 
   const paddingCells = 1;
+  const paddedWidth =
+    currentGridInfo.width + 2 * paddingCells * currentGridInfo.cellSize;
   const paddedHeight =
     currentGridInfo.height + 2 * paddingCells * currentGridInfo.cellSize;
 
-  const scale = screenHeight / paddedHeight;
+  const scaleFromWidth = screenWidth / paddedWidth;
+  const scaleFromHeight = screenHeight / paddedHeight;
+  const scale = Math.min(scaleFromWidth, scaleFromHeight);
 
   sceneContainer.scale.set(scale);
 
@@ -210,15 +262,29 @@ export function destroyCanvas(): void {
     app.canvas.removeEventListener("wheel", onWheel);
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("keyup", onKeyUp);
+    resizeObserver?.disconnect();
+    resizeObserver = null;
     app.destroy(true, { children: true });
     app = null;
     sceneContainer = null;
     gridGraphics = null;
     isDragging = false;
     isShiftHeld = false;
+    hasMovedView = false;
   }
 }
 
 export function getApp(): Application | null {
   return app;
+}
+
+export function hasViewMoved(): boolean {
+  return hasMovedView;
+}
+
+export function resetView(): void {
+  if (!app || !sceneContainer) return;
+  drawGrid(currentGridInfo.cols, currentGridInfo.rows);
+  setInitialView();
+  hasMovedView = false;
 }
