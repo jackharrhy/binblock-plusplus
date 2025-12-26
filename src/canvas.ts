@@ -4,287 +4,324 @@ import {
   Graphics,
   FederatedPointerEvent,
 } from "pixi.js";
+import createDebug from "debug";
+
+const debug = createDebug("binblock:canvas");
 
 const MIN_GRID_HEIGHT_RATIO = 0.45;
 const MIN_VISIBLE_CELLS = 4;
 
-let app: Application | null = null;
-let sceneContainer: Container | null = null;
-let gridGraphics: Graphics | null = null;
+export class CanvasController {
+  private app: Application;
+  private sceneContainer: Container;
+  private gridGraphics: Graphics | null = null;
 
-let isDragging = false;
-let isShiftHeld = false;
-let lastPointerPosition = { x: 0, y: 0 };
+  private isDragging = false;
+  private isShiftHeld = false;
+  private lastPointerPosition = { x: 0, y: 0 };
 
-let currentGridInfo = { width: 0, height: 0, cellSize: 0, cols: 0, rows: 0 };
-let lastScreenSize = { width: 0, height: 0 };
-let hasMovedView = false;
-let resizeObserver: ResizeObserver | null = null;
-
-export async function initCanvas(container: HTMLElement): Promise<Application> {
-  if (app) {
-    return app;
-  }
-
-  app = new Application();
-
-  await app.init({
-    resizeTo: container,
-    background: "white",
-    antialias: true,
-  });
-
-  container.appendChild(app.canvas);
-
-  sceneContainer = new Container();
-  app.stage.addChild(sceneContainer);
-
-  setupPanZoom(container);
-  drawGrid(8, 8);
-  setInitialView();
-
-  return app;
-}
-
-function setupPanZoom(container: HTMLElement): void {
-  if (!app || !sceneContainer) return;
-
-  app.stage.eventMode = "static";
-  app.stage.hitArea = app.screen;
-
-  app.stage.on("pointerdown", onDragStart);
-  app.stage.on("pointermove", onDragMove);
-  app.stage.on("pointerup", onDragEnd);
-  app.stage.on("pointerupoutside", onDragEnd);
-
-  app.canvas.addEventListener("wheel", onWheel, { passive: false });
-
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("keyup", onKeyUp);
-
-  resizeObserver = new ResizeObserver(() => {
-    requestAnimationFrame(onResize);
-  });
-  resizeObserver.observe(container);
-
-  lastScreenSize = { width: app.screen.width, height: app.screen.height };
-}
-
-function onResize(): void {
-  if (!app || !sceneContainer) return;
-
-  const newWidth = app.screen.width;
-  const newHeight = app.screen.height;
-
-  if (!hasMovedView) {
-    drawGrid(currentGridInfo.cols, currentGridInfo.rows);
-    setInitialView();
-  } else {
-    const oldCenterX = lastScreenSize.width / 2;
-    const oldCenterY = lastScreenSize.height / 2;
-
-    const worldCenterX =
-      (oldCenterX - sceneContainer.x) / sceneContainer.scale.x;
-    const worldCenterY =
-      (oldCenterY - sceneContainer.y) / sceneContainer.scale.y;
-
-    const newCenterX = newWidth / 2;
-    const newCenterY = newHeight / 2;
-
-    sceneContainer.x = newCenterX - worldCenterX * sceneContainer.scale.x;
-    sceneContainer.y = newCenterY - worldCenterY * sceneContainer.scale.y;
-  }
-
-  lastScreenSize = { width: newWidth, height: newHeight };
-  app.stage.hitArea = app.screen;
-}
-
-function onKeyDown(event: KeyboardEvent): void {
-  if (event.key === "Shift" && !isShiftHeld) {
-    isShiftHeld = true;
-    updateCursor();
-  }
-}
-
-function onKeyUp(event: KeyboardEvent): void {
-  if (event.key === "Shift") {
-    isShiftHeld = false;
-    isDragging = false;
-    updateCursor();
-  }
-}
-
-function updateCursor(): void {
-  if (!app) return;
-  if (isShiftHeld) {
-    app.canvas.style.cursor = isDragging ? "grabbing" : "grab";
-  } else {
-    app.canvas.style.cursor = "default";
-  }
-}
-
-function onDragStart(event: FederatedPointerEvent): void {
-  if (!isShiftHeld) return;
-  isDragging = true;
-  lastPointerPosition = { x: event.global.x, y: event.global.y };
-  updateCursor();
-}
-
-function onDragMove(event: FederatedPointerEvent): void {
-  if (!isDragging || !sceneContainer) return;
-
-  const dx = event.global.x - lastPointerPosition.x;
-  const dy = event.global.y - lastPointerPosition.y;
-
-  sceneContainer.x += dx;
-  sceneContainer.y += dy;
-
-  lastPointerPosition = { x: event.global.x, y: event.global.y };
-  hasMovedView = true;
-}
-
-function onDragEnd(): void {
-  isDragging = false;
-  updateCursor();
-}
-
-function onWheel(event: WheelEvent): void {
-  if (!app || !sceneContainer || !isShiftHeld) return;
-  event.preventDefault();
-
-  const scaleAmount = 1.1;
-  const direction = event.deltaY < 0 ? 1 : -1;
-  const factor = direction > 0 ? scaleAmount : 1 / scaleAmount;
-
-  const screenHeight = app.screen.height;
-  const screenWidth = app.screen.width;
-
-  const minScale =
-    (screenHeight * MIN_GRID_HEIGHT_RATIO) / currentGridInfo.height;
-  const maxScaleFromWidth =
-    screenWidth / (currentGridInfo.cellSize * MIN_VISIBLE_CELLS);
-  const maxScaleFromHeight =
-    screenHeight / (currentGridInfo.cellSize * MIN_VISIBLE_CELLS);
-  const maxScale = Math.min(maxScaleFromWidth, maxScaleFromHeight);
-
-  let newScale = sceneContainer.scale.x * factor;
-  newScale = Math.max(minScale, Math.min(maxScale, newScale));
-
-  if (newScale === sceneContainer.scale.x) return;
-
-  const pointerX = event.offsetX;
-  const pointerY = event.offsetY;
-
-  const worldPos = {
-    x: (pointerX - sceneContainer.x) / sceneContainer.scale.x,
-    y: (pointerY - sceneContainer.y) / sceneContainer.scale.y,
+  private currentGridInfo = {
+    width: 0,
+    height: 0,
+    cellSize: 0,
+    cols: 0,
+    rows: 0,
   };
+  private lastScreenSize = { width: 0, height: 0 };
+  private hasMovedView = false;
+  private resizeObserver: ResizeObserver | null = null;
 
-  sceneContainer.scale.x = newScale;
-  sceneContainer.scale.y = newScale;
+  private boundOnWheel: (e: WheelEvent) => void;
+  private boundOnKeyDown: (e: KeyboardEvent) => void;
+  private boundOnKeyUp: (e: KeyboardEvent) => void;
+  private boundOnDragStart: (e: FederatedPointerEvent) => void;
+  private boundOnDragMove: (e: FederatedPointerEvent) => void;
+  private boundOnDragEnd: () => void;
 
-  sceneContainer.x = pointerX - worldPos.x * sceneContainer.scale.x;
-  sceneContainer.y = pointerY - worldPos.y * sceneContainer.scale.y;
+  private constructor(app: Application) {
+    this.app = app;
+    this.sceneContainer = new Container();
+    this.app.stage.addChild(this.sceneContainer);
 
-  hasMovedView = true;
-}
-
-export function drawGrid(cols: number, rows: number): void {
-  if (!app || !sceneContainer) return;
-
-  if (gridGraphics) {
-    gridGraphics.destroy();
+    this.boundOnWheel = this.onWheel.bind(this);
+    this.boundOnKeyDown = this.onKeyDown.bind(this);
+    this.boundOnKeyUp = this.onKeyUp.bind(this);
+    this.boundOnDragStart = this.onDragStart.bind(this);
+    this.boundOnDragMove = this.onDragMove.bind(this);
+    this.boundOnDragEnd = this.onDragEnd.bind(this);
   }
 
-  gridGraphics = new Graphics();
-  sceneContainer.addChild(gridGraphics);
+  static async create(container: HTMLElement): Promise<CanvasController> {
+    debug("creating canvas");
 
-  const screenWidth = app.screen.width;
-  const screenHeight = app.screen.height;
+    const app = new Application();
 
-  const cellSize = Math.min(screenWidth / cols, screenHeight / rows);
-  const gridWidth = cellSize * cols;
-  const gridHeight = cellSize * rows;
+    await app.init({
+      resizeTo: container,
+      background: "white",
+      antialias: true,
+    });
 
-  currentGridInfo = {
-    width: gridWidth,
-    height: gridHeight,
-    cellSize,
-    cols,
-    rows,
-  };
+    container.appendChild(app.canvas);
+    debug("canvas appended, size: %dx%d", app.screen.width, app.screen.height);
 
-  const offsetX = (screenWidth - gridWidth) / 2;
-  const offsetY = (screenHeight - gridHeight) / 2;
+    const controller = new CanvasController(app);
+    controller.setupPanZoom(container);
+    controller.drawGrid(8, 8);
+    controller.setInitialView();
 
-  for (let i = 0; i <= cols; i++) {
-    const x = offsetX + i * cellSize;
-    gridGraphics.moveTo(x, offsetY);
-    gridGraphics.lineTo(x, offsetY + gridHeight);
+    debug("canvas initialized");
+    return controller;
   }
 
-  for (let j = 0; j <= rows; j++) {
-    const y = offsetY + j * cellSize;
-    gridGraphics.moveTo(offsetX, y);
-    gridGraphics.lineTo(offsetX + gridWidth, y);
+  private setupPanZoom(container: HTMLElement): void {
+    this.app.stage.eventMode = "static";
+    this.app.stage.hitArea = this.app.screen;
+
+    this.app.stage.on("pointerdown", this.boundOnDragStart);
+    this.app.stage.on("pointermove", this.boundOnDragMove);
+    this.app.stage.on("pointerup", this.boundOnDragEnd);
+    this.app.stage.on("pointerupoutside", this.boundOnDragEnd);
+
+    this.app.canvas.addEventListener("wheel", this.boundOnWheel, {
+      passive: false,
+    });
+
+    window.addEventListener("keydown", this.boundOnKeyDown);
+    window.addEventListener("keyup", this.boundOnKeyUp);
+
+    this.resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => this.onResize());
+    });
+    this.resizeObserver.observe(container);
+
+    this.lastScreenSize = {
+      width: this.app.screen.width,
+      height: this.app.screen.height,
+    };
   }
 
-  gridGraphics.stroke({ width: 2, color: 0x000000, alpha: 0.15 });
-}
+  private onResize(): void {
+    const newWidth = this.app.screen.width;
+    const newHeight = this.app.screen.height;
+    debug(
+      "resize: %dx%d -> %dx%d",
+      this.lastScreenSize.width,
+      this.lastScreenSize.height,
+      newWidth,
+      newHeight
+    );
 
-function setInitialView(): void {
-  if (!app || !sceneContainer) return;
+    if (!this.hasMovedView) {
+      debug("resize: resetting to initial view");
+      this.drawGrid(this.currentGridInfo.cols, this.currentGridInfo.rows);
+      this.setInitialView();
+    } else {
+      const oldCenterX = this.lastScreenSize.width / 2;
+      const oldCenterY = this.lastScreenSize.height / 2;
 
-  const screenWidth = app.screen.width;
-  const screenHeight = app.screen.height;
+      const worldCenterX =
+        (oldCenterX - this.sceneContainer.x) / this.sceneContainer.scale.x;
+      const worldCenterY =
+        (oldCenterY - this.sceneContainer.y) / this.sceneContainer.scale.y;
 
-  const paddingCells = 1;
-  const paddedWidth =
-    currentGridInfo.width + 2 * paddingCells * currentGridInfo.cellSize;
-  const paddedHeight =
-    currentGridInfo.height + 2 * paddingCells * currentGridInfo.cellSize;
+      const newCenterX = newWidth / 2;
+      const newCenterY = newHeight / 2;
 
-  const scaleFromWidth = screenWidth / paddedWidth;
-  const scaleFromHeight = screenHeight / paddedHeight;
-  const scale = Math.min(scaleFromWidth, scaleFromHeight);
+      this.sceneContainer.x =
+        newCenterX - worldCenterX * this.sceneContainer.scale.x;
+      this.sceneContainer.y =
+        newCenterY - worldCenterY * this.sceneContainer.scale.y;
+    }
 
-  sceneContainer.scale.set(scale);
-
-  const scaledWidth = screenWidth * scale;
-  const scaledHeight = screenHeight * scale;
-
-  sceneContainer.x = (screenWidth - scaledWidth) / 2;
-  sceneContainer.y = (screenHeight - scaledHeight) / 2;
-}
-
-export function destroyCanvas(): void {
-  if (app) {
-    app.canvas.removeEventListener("wheel", onWheel);
-    window.removeEventListener("keydown", onKeyDown);
-    window.removeEventListener("keyup", onKeyUp);
-    resizeObserver?.disconnect();
-    resizeObserver = null;
-    app.destroy(true, { children: true });
-    app = null;
-    sceneContainer = null;
-    gridGraphics = null;
-    isDragging = false;
-    isShiftHeld = false;
-    hasMovedView = false;
+    this.lastScreenSize = { width: newWidth, height: newHeight };
+    this.app.stage.hitArea = this.app.screen;
   }
-}
 
-export function getApp(): Application | null {
-  return app;
-}
+  private onKeyDown(event: KeyboardEvent): void {
+    if (event.key === "Shift" && !this.isShiftHeld) {
+      this.isShiftHeld = true;
+      this.updateCursor();
+    }
+  }
 
-export function hasViewMoved(): boolean {
-  return hasMovedView;
-}
+  private onKeyUp(event: KeyboardEvent): void {
+    if (event.key === "Shift") {
+      this.isShiftHeld = false;
+      this.isDragging = false;
+      this.updateCursor();
+    }
+  }
 
-export function resetView(): void {
-  if (!app || !sceneContainer) return;
-  drawGrid(currentGridInfo.cols, currentGridInfo.rows);
-  setInitialView();
-  hasMovedView = false;
+  private updateCursor(): void {
+    if (this.isShiftHeld) {
+      this.app.canvas.style.cursor = this.isDragging ? "grabbing" : "grab";
+    } else {
+      this.app.canvas.style.cursor = "default";
+    }
+  }
+
+  private onDragStart(event: FederatedPointerEvent): void {
+    if (!this.isShiftHeld) return;
+    this.isDragging = true;
+    this.lastPointerPosition = { x: event.global.x, y: event.global.y };
+    this.updateCursor();
+  }
+
+  private onDragMove(event: FederatedPointerEvent): void {
+    if (!this.isDragging) return;
+
+    const dx = event.global.x - this.lastPointerPosition.x;
+    const dy = event.global.y - this.lastPointerPosition.y;
+
+    this.sceneContainer.x += dx;
+    this.sceneContainer.y += dy;
+
+    this.lastPointerPosition = { x: event.global.x, y: event.global.y };
+    this.hasMovedView = true;
+  }
+
+  private onDragEnd(): void {
+    this.isDragging = false;
+    this.updateCursor();
+  }
+
+  private onWheel(event: WheelEvent): void {
+    if (!this.isShiftHeld) return;
+    event.preventDefault();
+
+    const scaleAmount = 1.1;
+    const direction = event.deltaY < 0 ? 1 : -1;
+    const factor = direction > 0 ? scaleAmount : 1 / scaleAmount;
+
+    const screenHeight = this.app.screen.height;
+    const screenWidth = this.app.screen.width;
+
+    const minScale =
+      (screenHeight * MIN_GRID_HEIGHT_RATIO) / this.currentGridInfo.height;
+    const maxScaleFromWidth =
+      screenWidth / (this.currentGridInfo.cellSize * MIN_VISIBLE_CELLS);
+    const maxScaleFromHeight =
+      screenHeight / (this.currentGridInfo.cellSize * MIN_VISIBLE_CELLS);
+    const maxScale = Math.min(maxScaleFromWidth, maxScaleFromHeight);
+
+    let newScale = this.sceneContainer.scale.x * factor;
+    newScale = Math.max(minScale, Math.min(maxScale, newScale));
+
+    if (newScale === this.sceneContainer.scale.x) return;
+
+    const pointerX = event.offsetX;
+    const pointerY = event.offsetY;
+
+    const worldPos = {
+      x: (pointerX - this.sceneContainer.x) / this.sceneContainer.scale.x,
+      y: (pointerY - this.sceneContainer.y) / this.sceneContainer.scale.y,
+    };
+
+    this.sceneContainer.scale.x = newScale;
+    this.sceneContainer.scale.y = newScale;
+
+    this.sceneContainer.x = pointerX - worldPos.x * this.sceneContainer.scale.x;
+    this.sceneContainer.y = pointerY - worldPos.y * this.sceneContainer.scale.y;
+
+    debug("zoom: scale=%.3f", newScale);
+    this.hasMovedView = true;
+  }
+
+  drawGrid(cols: number, rows: number): void {
+    debug("drawGrid: %dx%d", cols, rows);
+
+    if (this.gridGraphics) {
+      this.gridGraphics.destroy();
+    }
+
+    this.gridGraphics = new Graphics();
+    this.sceneContainer.addChild(this.gridGraphics);
+
+    const screenWidth = this.app.screen.width;
+    const screenHeight = this.app.screen.height;
+
+    const cellSize = Math.min(screenWidth / cols, screenHeight / rows);
+    const gridWidth = cellSize * cols;
+    const gridHeight = cellSize * rows;
+
+    this.currentGridInfo = {
+      width: gridWidth,
+      height: gridHeight,
+      cellSize,
+      cols,
+      rows,
+    };
+
+    const offsetX = (screenWidth - gridWidth) / 2;
+    const offsetY = (screenHeight - gridHeight) / 2;
+
+    for (let i = 0; i <= cols; i++) {
+      const x = offsetX + i * cellSize;
+      this.gridGraphics.moveTo(x, offsetY);
+      this.gridGraphics.lineTo(x, offsetY + gridHeight);
+    }
+
+    for (let j = 0; j <= rows; j++) {
+      const y = offsetY + j * cellSize;
+      this.gridGraphics.moveTo(offsetX, y);
+      this.gridGraphics.lineTo(offsetX + gridWidth, y);
+    }
+
+    this.gridGraphics.stroke({ width: 2, color: 0x000000, alpha: 0.15 });
+  }
+
+  private setInitialView(): void {
+    const screenWidth = this.app.screen.width;
+    const screenHeight = this.app.screen.height;
+
+    const paddingCells = 1;
+    const paddedWidth =
+      this.currentGridInfo.width +
+      2 * paddingCells * this.currentGridInfo.cellSize;
+    const paddedHeight =
+      this.currentGridInfo.height +
+      2 * paddingCells * this.currentGridInfo.cellSize;
+
+    const scaleFromWidth = screenWidth / paddedWidth;
+    const scaleFromHeight = screenHeight / paddedHeight;
+    const scale = Math.min(scaleFromWidth, scaleFromHeight);
+
+    this.sceneContainer.scale.set(scale);
+
+    const scaledWidth = screenWidth * scale;
+    const scaledHeight = screenHeight * scale;
+
+    this.sceneContainer.x = (screenWidth - scaledWidth) / 2;
+    this.sceneContainer.y = (screenHeight - scaledHeight) / 2;
+  }
+
+  destroy(): void {
+    debug("destroying canvas");
+
+    this.app.canvas.removeEventListener("wheel", this.boundOnWheel);
+    window.removeEventListener("keydown", this.boundOnKeyDown);
+    window.removeEventListener("keyup", this.boundOnKeyUp);
+
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+
+    this.app.destroy(true, { children: true });
+
+    debug("canvas destroyed");
+  }
+
+  getApp(): Application {
+    return this.app;
+  }
+
+  hasViewMoved(): boolean {
+    return this.hasMovedView;
+  }
+
+  resetView(): void {
+    this.drawGrid(this.currentGridInfo.cols, this.currentGridInfo.rows);
+    this.setInitialView();
+    this.hasMovedView = false;
+  }
 }

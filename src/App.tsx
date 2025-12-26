@@ -1,13 +1,19 @@
-import { initCanvas, destroyCanvas } from "./canvas";
+import { CanvasController } from "./canvas";
 import "./App.css";
 
 export function App() {
   const handleContainerRef = (node: HTMLDivElement | null) => {
-    if (node) {
-      initCanvas(node);
-    } else {
-      destroyCanvas();
-    }
+    if (!node) return;
+
+    let controller: CanvasController | null = null;
+
+    CanvasController.create(node).then((c) => {
+      controller = c;
+    });
+
+    return () => {
+      controller?.destroy();
+    };
   };
 
   return (
