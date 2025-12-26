@@ -3,8 +3,12 @@ import {
   Container,
   Graphics,
   FederatedPointerEvent,
+  Sprite,
+  Texture,
+  Assets,
 } from "pixi.js";
 import createDebug from "debug";
+import { blocks, type GridState } from "./blocks";
 
 const debug = createDebug("binblock:canvas");
 
@@ -15,9 +19,11 @@ export class CanvasController {
   private app: Application;
   private sceneContainer: Container;
   private gridGraphics: Graphics | null = null;
+  private blocksContainer: Container;
 
   private isDragging = false;
   private isShiftHeld = false;
+  private isPainting = false;
   private lastPointerPosition = { x: 0, y: 0 };
 
   private currentGridInfo = {
@@ -26,10 +32,17 @@ export class CanvasController {
     cellSize: 0,
     cols: 0,
     rows: 0,
+    offsetX: 0,
+    offsetY: 0,
   };
   private lastScreenSize = { width: 0, height: 0 };
   private hasMovedView = false;
   private resizeObserver: ResizeObserver | null = null;
+
+  private blockTextures: Map<string, Texture> = new Map();
+  private gridData: Map<string, string> = new Map();
+  private cellSprites: Map<string, Sprite> = new Map();
+  private selectedBlockId: string | null = null;
 
   private boundOnWheel: (e: WheelEvent) => void;
   private boundOnKeyDown: (e: KeyboardEvent) => void;
@@ -41,7 +54,9 @@ export class CanvasController {
   private constructor(app: Application) {
     this.app = app;
     this.sceneContainer = new Container();
+    this.blocksContainer = new Container();
     this.app.stage.addChild(this.sceneContainer);
+    this.sceneContainer.addChild(this.blocksContainer);
 
     this.boundOnWheel = this.onWheel.bind(this);
     this.boundOnKeyDown = this.onKeyDown.bind(this);
@@ -66,12 +81,25 @@ export class CanvasController {
     debug("canvas appended, size: %dx%d", app.screen.width, app.screen.height);
 
     const controller = new CanvasController(app);
+    await controller.loadBlocks();
     controller.setupPanZoom(container);
     controller.drawGrid(8, 8);
     controller.setInitialView();
 
     debug("canvas initialized");
     return controller;
+  }
+
+  private async loadBlocks(): Promise<void> {
+    debug("loading %d block textures", blocks.length);
+
+    const loadPromises = blocks.map(async (block) => {
+      const texture = await Assets.load<Texture>(block.url);
+      this.blockTextures.set(block.id, texture);
+    });
+
+    await Promise.all(loadPromises);
+    debug("loaded %d block textures", this.blockTextures.size);
   }
 
   private setupPanZoom(container: HTMLElement): void {
@@ -154,35 +182,59 @@ export class CanvasController {
   }
 
   private updateCursor(): void {
+    let cursor: string;
     if (this.isShiftHeld) {
-      this.app.canvas.style.cursor = this.isDragging ? "grabbing" : "grab";
+      cursor = this.isDragging ? "grabbing" : "grab";
+    } else if (this.selectedBlockId) {
+      cursor = "crosshair";
     } else {
-      this.app.canvas.style.cursor = "default";
+      cursor = "default";
     }
+    debug(
+      "updateCursor: %s (shift=%s, selected=%s)",
+      cursor,
+      this.isShiftHeld,
+      this.selectedBlockId
+    );
+    this.app.canvas.style.cursor = cursor;
   }
 
   private onDragStart(event: FederatedPointerEvent): void {
-    if (!this.isShiftHeld) return;
-    this.isDragging = true;
-    this.lastPointerPosition = { x: event.global.x, y: event.global.y };
-    this.updateCursor();
+    debug(
+      "onDragStart: shift=%s, selectedBlock=%s, pos=(%d,%d)",
+      this.isShiftHeld,
+      this.selectedBlockId,
+      event.global.x,
+      event.global.y
+    );
+    if (this.isShiftHeld) {
+      this.isDragging = true;
+      this.lastPointerPosition = { x: event.global.x, y: event.global.y };
+      this.updateCursor();
+    } else if (this.selectedBlockId) {
+      this.isPainting = true;
+      this.paintAtPosition(event.global.x, event.global.y);
+    }
   }
 
   private onDragMove(event: FederatedPointerEvent): void {
-    if (!this.isDragging) return;
+    if (this.isDragging) {
+      const dx = event.global.x - this.lastPointerPosition.x;
+      const dy = event.global.y - this.lastPointerPosition.y;
 
-    const dx = event.global.x - this.lastPointerPosition.x;
-    const dy = event.global.y - this.lastPointerPosition.y;
+      this.sceneContainer.x += dx;
+      this.sceneContainer.y += dy;
 
-    this.sceneContainer.x += dx;
-    this.sceneContainer.y += dy;
-
-    this.lastPointerPosition = { x: event.global.x, y: event.global.y };
-    this.hasMovedView = true;
+      this.lastPointerPosition = { x: event.global.x, y: event.global.y };
+      this.hasMovedView = true;
+    } else if (this.isPainting && this.selectedBlockId) {
+      this.paintAtPosition(event.global.x, event.global.y);
+    }
   }
 
   private onDragEnd(): void {
     this.isDragging = false;
+    this.isPainting = false;
     this.updateCursor();
   }
 
@@ -228,6 +280,99 @@ export class CanvasController {
     this.hasMovedView = true;
   }
 
+  private screenToGrid(
+    screenX: number,
+    screenY: number
+  ): { x: number; y: number } | null {
+    const worldX =
+      (screenX - this.sceneContainer.x) / this.sceneContainer.scale.x;
+    const worldY =
+      (screenY - this.sceneContainer.y) / this.sceneContainer.scale.y;
+
+    const { offsetX, offsetY, cellSize, cols, rows } = this.currentGridInfo;
+
+    const gridX = Math.floor((worldX - offsetX) / cellSize);
+    const gridY = Math.floor((worldY - offsetY) / cellSize);
+
+    debug(
+      "screenToGrid: screen(%d,%d) -> world(%d,%d) -> grid(%d,%d) bounds(0-%d, 0-%d)",
+      screenX,
+      screenY,
+      worldX,
+      worldY,
+      gridX,
+      gridY,
+      cols - 1,
+      rows - 1
+    );
+
+    if (gridX < 0 || gridX >= cols || gridY < 0 || gridY >= rows) {
+      return null;
+    }
+
+    return { x: gridX, y: gridY };
+  }
+
+  private paintAtPosition(screenX: number, screenY: number): void {
+    if (!this.selectedBlockId) return;
+
+    const gridPos = this.screenToGrid(screenX, screenY);
+    if (!gridPos) return;
+
+    this.fillCell(gridPos.x, gridPos.y, this.selectedBlockId);
+  }
+
+  fillCell(x: number, y: number, blockId: string): void {
+    const key = `${x},${y}`;
+    const texture = this.blockTextures.get(blockId);
+    if (!texture) {
+      debug("texture not found for block %s", blockId);
+      return;
+    }
+
+    const existingSprite = this.cellSprites.get(key);
+    if (existingSprite) {
+      existingSprite.destroy();
+    }
+
+    const sprite = new Sprite(texture);
+    const { offsetX, offsetY, cellSize } = this.currentGridInfo;
+
+    sprite.x = offsetX + x * cellSize;
+    sprite.y = offsetY + y * cellSize;
+    sprite.width = cellSize;
+    sprite.height = cellSize;
+
+    this.blocksContainer.addChild(sprite);
+    this.cellSprites.set(key, sprite);
+    this.gridData.set(key, blockId);
+
+    debug("filled cell %s with block %s", key, blockId);
+  }
+
+  clearCell(x: number, y: number): void {
+    const key = `${x},${y}`;
+    const sprite = this.cellSprites.get(key);
+
+    if (sprite) {
+      sprite.destroy();
+      this.cellSprites.delete(key);
+    }
+
+    this.gridData.delete(key);
+    debug("cleared cell %s", key);
+  }
+
+  setSelectedBlock(blockId: string | null): void {
+    this.selectedBlockId = blockId;
+    this.updateCursor();
+    debug("selected block: %s", blockId);
+  }
+
+  getSelectedBlock(): string | null {
+    return this.selectedBlockId;
+  }
+
   drawGrid(cols: number, rows: number): void {
     debug("drawGrid: %dx%d", cols, rows);
 
@@ -236,7 +381,7 @@ export class CanvasController {
     }
 
     this.gridGraphics = new Graphics();
-    this.sceneContainer.addChild(this.gridGraphics);
+    this.sceneContainer.addChildAt(this.gridGraphics, 0);
 
     const screenWidth = this.app.screen.width;
     const screenHeight = this.app.screen.height;
@@ -245,16 +390,18 @@ export class CanvasController {
     const gridWidth = cellSize * cols;
     const gridHeight = cellSize * rows;
 
+    const offsetX = (screenWidth - gridWidth) / 2;
+    const offsetY = (screenHeight - gridHeight) / 2;
+
     this.currentGridInfo = {
       width: gridWidth,
       height: gridHeight,
       cellSize,
       cols,
       rows,
+      offsetX,
+      offsetY,
     };
-
-    const offsetX = (screenWidth - gridWidth) / 2;
-    const offsetY = (screenHeight - gridHeight) / 2;
 
     for (let i = 0; i <= cols; i++) {
       const x = offsetX + i * cellSize;
@@ -269,6 +416,23 @@ export class CanvasController {
     }
 
     this.gridGraphics.stroke({ width: 2, color: 0x000000, alpha: 0.15 });
+
+    this.repositionSprites();
+  }
+
+  private repositionSprites(): void {
+    const { offsetX, offsetY, cellSize } = this.currentGridInfo;
+
+    for (const [key, sprite] of this.cellSprites) {
+      const [xStr, yStr] = key.split(",");
+      const x = parseInt(xStr, 10);
+      const y = parseInt(yStr, 10);
+
+      sprite.x = offsetX + x * cellSize;
+      sprite.y = offsetY + y * cellSize;
+      sprite.width = cellSize;
+      sprite.height = cellSize;
+    }
   }
 
   private setInitialView(): void {
@@ -294,6 +458,52 @@ export class CanvasController {
 
     this.sceneContainer.x = (screenWidth - scaledWidth) / 2;
     this.sceneContainer.y = (screenHeight - scaledHeight) / 2;
+  }
+
+  exportGrid(): GridState {
+    const cells: Record<string, string | null> = {};
+
+    for (const [key, blockId] of this.gridData) {
+      cells[key] = blockId;
+    }
+
+    return {
+      cols: this.currentGridInfo.cols,
+      rows: this.currentGridInfo.rows,
+      cells,
+    };
+  }
+
+  importGrid(state: GridState): void {
+    for (const sprite of this.cellSprites.values()) {
+      sprite.destroy();
+    }
+    this.cellSprites.clear();
+    this.gridData.clear();
+
+    if (
+      state.cols !== this.currentGridInfo.cols ||
+      state.rows !== this.currentGridInfo.rows
+    ) {
+      this.drawGrid(state.cols, state.rows);
+      this.setInitialView();
+    }
+
+    for (const [key, blockId] of Object.entries(state.cells)) {
+      if (blockId) {
+        const [xStr, yStr] = key.split(",");
+        const x = parseInt(xStr, 10);
+        const y = parseInt(yStr, 10);
+        this.fillCell(x, y, blockId);
+      }
+    }
+
+    debug(
+      "imported grid: %dx%d with %d cells",
+      state.cols,
+      state.rows,
+      Object.keys(state.cells).length
+    );
   }
 
   destroy(): void {
