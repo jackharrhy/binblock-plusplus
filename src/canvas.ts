@@ -8,6 +8,8 @@ import {
 } from "pixi.js";
 import createDebug from "debug";
 import { blocks, type GridState } from "./blocks";
+import { useGridStore } from "./store/gridStore";
+import { useAppStore } from "./store/appStore";
 
 const debug = createDebug("binblock:canvas");
 
@@ -24,7 +26,10 @@ export class CanvasController {
   private isShiftHeld = false;
   private isPainting = false;
   private isErasing = false;
+  private isDrawingShape = false;
   private lastPointerPosition = { x: 0, y: 0 };
+  private shapeStartCell: { x: number; y: number } | null = null;
+  private previewGraphics: Graphics | null = null;
 
   private onBlockPicked: ((blockId: string) => void) | null = null;
 
@@ -227,37 +232,56 @@ export class CanvasController {
   }
 
   private onDragStart(event: FederatedPointerEvent): void {
+    const tool = useAppStore.getState().currentTool;
     debug(
-      "onDragStart: shift=%s, button=%d, selectedBlock=%s, pos=(%d,%d)",
+      "onDragStart: shift=%s, button=%d, tool=%s, selectedBlock=%s, pos=(%d,%d)",
       this.isShiftHeld,
       event.button,
+      tool,
       this.selectedBlockId,
       event.global.x,
       event.global.y
     );
 
-    // Middle-click: pick block from cell
     if (event.button === 1) {
       this.pickBlockAtPosition(event.global.x, event.global.y);
       return;
     }
 
-    // Right-click: erase (set to 00)
     if (event.button === 2) {
+      // Push history before erasing
+      useGridStore.getState().pushHistory();
       this.isErasing = true;
       this.eraseAtPosition(event.global.x, event.global.y);
       return;
     }
 
-    // Left-click
     if (this.isShiftHeld) {
       this.isDragging = true;
       this.lastPointerPosition = { x: event.global.x, y: event.global.y };
       this.stopAnimation();
       this.updateCursor();
     } else if (this.selectedBlockId) {
-      this.isPainting = true;
-      this.paintAtPosition(event.global.x, event.global.y);
+      const gridPos = this.screenToGrid(event.global.x, event.global.y);
+
+      // Push history before any drawing operation
+      useGridStore.getState().pushHistory();
+
+      if (tool === "pencil") {
+        this.isPainting = true;
+        this.paintAtPosition(event.global.x, event.global.y);
+      } else if (tool === "fill") {
+        if (gridPos) {
+          this.floodFill(gridPos.x, gridPos.y, this.selectedBlockId);
+        }
+      } else {
+        // Shape tools: line, rect, circle
+        if (gridPos) {
+          this.isDrawingShape = true;
+          this.shapeStartCell = gridPos;
+          this.createPreviewGraphics();
+        }
+      }
     }
   }
 
@@ -269,7 +293,6 @@ export class CanvasController {
       this.sceneContainer.x += dx;
       this.sceneContainer.y += dy;
 
-      // Keep targets in sync so any future animation starts from current position
       this.targetX = this.sceneContainer.x;
       this.targetY = this.sceneContainer.y;
 
@@ -279,13 +302,26 @@ export class CanvasController {
       this.eraseAtPosition(event.global.x, event.global.y);
     } else if (this.isPainting && this.selectedBlockId) {
       this.paintAtPosition(event.global.x, event.global.y);
+    } else if (this.isDrawingShape && this.shapeStartCell) {
+      const gridPos = this.screenToGrid(event.global.x, event.global.y);
+      if (gridPos) {
+        this.updateShapePreview(this.shapeStartCell, gridPos);
+      }
     }
   }
 
   private onDragEnd(): void {
+    if (this.isDrawingShape && this.shapeStartCell && this.selectedBlockId) {
+      // Finalize the shape by getting the last preview position
+      this.finalizeShape();
+    }
+
     this.isDragging = false;
     this.isPainting = false;
     this.isErasing = false;
+    this.isDrawingShape = false;
+    this.shapeStartCell = null;
+    this.clearPreviewGraphics();
     this.updateCursor();
   }
 
@@ -341,7 +377,6 @@ export class CanvasController {
     if (this.isAnimating) {
       this.app.ticker.remove(this.animateZoom, this);
       this.isAnimating = false;
-      // Sync targets to current position
       this.targetScale = this.sceneContainer.scale.x;
       this.targetX = this.sceneContainer.x;
       this.targetY = this.sceneContainer.y;
@@ -441,6 +476,274 @@ export class CanvasController {
     this.onBlockPicked?.(blockId);
   }
 
+  // ===== Shape Tool Helpers =====
+
+  private lastPreviewEnd: { x: number; y: number } | null = null;
+
+  private createPreviewGraphics(): void {
+    this.clearPreviewGraphics();
+    this.previewGraphics = new Graphics();
+    this.sceneContainer.addChild(this.previewGraphics);
+  }
+
+  private clearPreviewGraphics(): void {
+    if (this.previewGraphics) {
+      this.previewGraphics.destroy();
+      this.previewGraphics = null;
+    }
+    this.lastPreviewEnd = null;
+  }
+
+  private updateShapePreview(
+    start: { x: number; y: number },
+    end: { x: number; y: number }
+  ): void {
+    if (!this.previewGraphics) return;
+    this.lastPreviewEnd = end;
+
+    this.previewGraphics.clear();
+    const cells = this.getShapeCells(start, end);
+    const { offsetX, offsetY, cellSize } = this.currentGridInfo;
+
+    for (const cell of cells) {
+      this.previewGraphics.rect(
+        offsetX + cell.x * cellSize + 2,
+        offsetY + cell.y * cellSize + 2,
+        cellSize - 4,
+        cellSize - 4
+      );
+    }
+    this.previewGraphics.fill({ color: 0x000000, alpha: 0.2 });
+  }
+
+  private finalizeShape(): void {
+    if (!this.shapeStartCell || !this.lastPreviewEnd || !this.selectedBlockId)
+      return;
+
+    const cells = this.getShapeCells(this.shapeStartCell, this.lastPreviewEnd);
+    for (const cell of cells) {
+      this.fillCell(cell.x, cell.y, this.selectedBlockId);
+    }
+  }
+
+  private getShapeCells(
+    start: { x: number; y: number },
+    end: { x: number; y: number }
+  ): { x: number; y: number }[] {
+    const tool = useAppStore.getState().currentTool;
+
+    switch (tool) {
+      case "line":
+        return this.getLineCells(start.x, start.y, end.x, end.y);
+      case "rect":
+        return this.getRectCells(start.x, start.y, end.x, end.y, false);
+      case "rect-filled":
+        return this.getRectCells(start.x, start.y, end.x, end.y, true);
+      case "circle":
+        return this.getCircleCells(start.x, start.y, end.x, end.y, false);
+      case "circle-filled":
+        return this.getCircleCells(start.x, start.y, end.x, end.y, true);
+      default:
+        return [];
+    }
+  }
+
+  private getLineCells(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number
+  ): { x: number; y: number }[] {
+    // Bresenham's line algorithm
+    const cells: { x: number; y: number }[] = [];
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let x = x0;
+    let y = y0;
+
+    while (true) {
+      if (this.isInGrid(x, y)) {
+        cells.push({ x, y });
+      }
+      if (x === x1 && y === y1) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) {
+        err -= dy;
+        x += sx;
+      }
+      if (e2 < dx) {
+        err += dx;
+        y += sy;
+      }
+    }
+    return cells;
+  }
+
+  private getRectCells(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    filled: boolean
+  ): { x: number; y: number }[] {
+    const cells: { x: number; y: number }[] = [];
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        if (!this.isInGrid(x, y)) continue;
+        if (filled || x === minX || x === maxX || y === minY || y === maxY) {
+          cells.push({ x, y });
+        }
+      }
+    }
+    return cells;
+  }
+
+  private getCircleCells(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    filled: boolean
+  ): { x: number; y: number }[] {
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    const cx = minX + width / 2;
+    const cy = minY + height / 2;
+
+    const a = Math.floor(width / 2);
+    const b = Math.floor(height / 2);
+
+    if (a === 0 && b === 0) {
+      const cellX = Math.round(cx);
+      const cellY = Math.round(cy);
+      return this.isInGrid(cellX, cellY) ? [{ x: cellX, y: cellY }] : [];
+    }
+
+    const cells: { x: number; y: number }[] = [];
+    const seen = new Set<string>();
+
+    const addCell = (x: number, y: number) => {
+      const key = `${x},${y}`;
+      if (!seen.has(key) && this.isInGrid(x, y)) {
+        seen.add(key);
+        cells.push({ x, y });
+      }
+    };
+
+    const plotEllipsePoints = (
+      xcenter: number,
+      ycenter: number,
+      x: number,
+      y: number
+    ) => {
+      if (filled) {
+        for (
+          let px = Math.round(xcenter - x);
+          px <= Math.round(xcenter + x);
+          px++
+        ) {
+          addCell(px, Math.round(ycenter + y));
+          addCell(px, Math.round(ycenter - y));
+        }
+      } else {
+        addCell(Math.round(xcenter + x), Math.round(ycenter + y));
+        addCell(Math.round(xcenter - x), Math.round(ycenter + y));
+        addCell(Math.round(xcenter + x), Math.round(ycenter - y));
+        addCell(Math.round(xcenter - x), Math.round(ycenter - y));
+      }
+    };
+
+    const a2 = a * a;
+    const b2 = b * b;
+    const twoA2 = 2 * a2;
+    const twoB2 = 2 * b2;
+
+    let x = 0;
+    let y = b;
+    let px = 0;
+    let py = twoA2 * y;
+
+    let p1 = b2 - a2 * b + 0.25 * a2;
+    while (px < py) {
+      plotEllipsePoints(cx, cy, x, y);
+      x++;
+      px += twoB2;
+      if (p1 < 0) {
+        p1 += b2 + px;
+      } else {
+        y--;
+        py -= twoA2;
+        p1 += b2 + px - py;
+      }
+    }
+
+    let p2 = b2 * (x + 0.5) * (x + 0.5) + a2 * (y - 1) * (y - 1) - a2 * b2;
+    while (y >= 0) {
+      plotEllipsePoints(cx, cy, x, y);
+      y--;
+      py -= twoA2;
+      if (p2 > 0) {
+        p2 += a2 - py;
+      } else {
+        x++;
+        px += twoB2;
+        p2 += a2 - py + px;
+      }
+    }
+
+    return cells;
+  }
+
+  private floodFill(startX: number, startY: number, fillBlockId: string): void {
+    const targetBlockId = this.gridData.get(`${startX},${startY}`) ?? "00";
+
+    if (targetBlockId === fillBlockId) return;
+
+    const stack: { x: number; y: number }[] = [{ x: startX, y: startY }];
+    const visited = new Set<string>();
+
+    while (stack.length > 0) {
+      const { x, y } = stack.pop()!;
+      const key = `${x},${y}`;
+
+      if (visited.has(key) || !this.isInGrid(x, y)) continue;
+      visited.add(key);
+
+      const currentBlockId = this.gridData.get(key) ?? "00";
+      if (currentBlockId !== targetBlockId) continue;
+
+      this.fillCell(x, y, fillBlockId);
+
+      stack.push({ x: x + 1, y });
+      stack.push({ x: x - 1, y });
+      stack.push({ x, y: y + 1 });
+      stack.push({ x, y: y - 1 });
+    }
+  }
+
+  private isInGrid(x: number, y: number): boolean {
+    return (
+      x >= 0 &&
+      x < this.currentGridInfo.cols &&
+      y >= 0 &&
+      y < this.currentGridInfo.rows
+    );
+  }
+
   fillCell(x: number, y: number, blockId: string): void {
     const key = `${x},${y}`;
     const texture = this.blockTextures.get(blockId);
@@ -466,11 +769,12 @@ export class CanvasController {
     this.cellSprites.set(key, sprite);
     this.gridData.set(key, blockId);
 
+    useGridStore.getState().setCell(x, y, blockId);
+
     debug("filled cell %s with block %s", key, blockId);
   }
 
   clearCell(x: number, y: number): void {
-    // Clearing a cell means setting it to the transparent "00" block
     this.fillCell(x, y, "00");
     debug("cleared cell %d,%d to 00", x, y);
   }
@@ -491,6 +795,9 @@ export class CanvasController {
 
   drawGrid(cols: number, rows: number): void {
     debug("drawGrid: %dx%d", cols, rows);
+
+    const dimensionsChanged =
+      cols !== this.currentGridInfo.cols || rows !== this.currentGridInfo.rows;
 
     if (this.gridGraphics) {
       this.gridGraphics.destroy();
@@ -518,6 +825,10 @@ export class CanvasController {
       offsetX,
       offsetY,
     };
+
+    if (dimensionsChanged) {
+      useGridStore.getState().clearGrid(cols, rows);
+    }
 
     for (let i = 0; i <= cols; i++) {
       const x = offsetX + i * cellSize;
@@ -607,6 +918,8 @@ export class CanvasController {
     ) {
       this.drawGrid(state.cols, state.rows);
       this.setInitialView();
+    } else {
+      useGridStore.getState().clearGrid(state.cols, state.rows);
     }
 
     for (const [key, blockId] of Object.entries(state.cells)) {
@@ -656,5 +969,138 @@ export class CanvasController {
     this.drawGrid(this.currentGridInfo.cols, this.currentGridInfo.rows);
     this.setInitialView();
     this.hasMovedView = false;
+  }
+
+  resizeGrid(newCols: number, newRows: number): void {
+    const oldCols = this.currentGridInfo.cols;
+    const oldRows = this.currentGridInfo.rows;
+
+    debug("resizeGrid: %dx%d -> %dx%d", oldCols, oldRows, newCols, newRows);
+
+    const savedCells = new Map(this.gridData);
+
+    const colsToRemove = Math.max(0, oldCols - newCols);
+    const rowsToRemove = Math.max(0, oldRows - newRows);
+
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (rowsToRemove > 0) {
+      let emptyTopRows = 0;
+      for (let y = 0; y < oldRows && emptyTopRows < rowsToRemove; y++) {
+        let rowEmpty = true;
+        for (let x = 0; x < oldCols; x++) {
+          const blockId = savedCells.get(`${x},${y}`);
+          if (blockId && blockId !== "00") {
+            rowEmpty = false;
+            break;
+          }
+        }
+        if (rowEmpty) {
+          emptyTopRows++;
+        } else {
+          break;
+        }
+      }
+      offsetY = Math.min(emptyTopRows, rowsToRemove);
+    }
+
+    if (colsToRemove > 0) {
+      let emptyLeftCols = 0;
+      for (let x = 0; x < oldCols && emptyLeftCols < colsToRemove; x++) {
+        let colEmpty = true;
+        for (let y = 0; y < oldRows; y++) {
+          const blockId = savedCells.get(`${x},${y}`);
+          if (blockId && blockId !== "00") {
+            colEmpty = false;
+            break;
+          }
+        }
+        if (colEmpty) {
+          emptyLeftCols++;
+        } else {
+          break;
+        }
+      }
+      offsetX = Math.min(emptyLeftCols, colsToRemove);
+    }
+
+    debug("resizeGrid: sliding by offset (%d, %d)", offsetX, offsetY);
+
+    for (const sprite of this.cellSprites.values()) {
+      sprite.destroy();
+    }
+    this.cellSprites.clear();
+    this.gridData.clear();
+
+    this.drawGrid(newCols, newRows);
+    this.setInitialView();
+    this.hasMovedView = false;
+
+    for (const [key, blockId] of savedCells) {
+      const [xStr, yStr] = key.split(",");
+      const oldX = parseInt(xStr, 10);
+      const oldY = parseInt(yStr, 10);
+
+      const newX = oldX - offsetX;
+      const newY = oldY - offsetY;
+
+      if (newX >= 0 && newX < newCols && newY >= 0 && newY < newRows) {
+        this.fillCell(newX, newY, blockId);
+      }
+    }
+
+    debug("resizeGrid complete, preserved %d cells", this.gridData.size);
+  }
+
+  clearAllCells(): void {
+    debug("clearAllCells");
+
+    for (const sprite of this.cellSprites.values()) {
+      sprite.destroy();
+    }
+    this.cellSprites.clear();
+    this.gridData.clear();
+
+    useGridStore
+      .getState()
+      .clearGrid(this.currentGridInfo.cols, this.currentGridInfo.rows);
+
+    debug("cleared all cells");
+  }
+
+  syncFromStore(): void {
+    debug("syncFromStore");
+
+    const { cells } = useGridStore.getState();
+
+    for (const sprite of this.cellSprites.values()) {
+      sprite.destroy();
+    }
+    this.cellSprites.clear();
+    this.gridData.clear();
+
+    for (const [key, blockId] of Object.entries(cells)) {
+      const [xStr, yStr] = key.split(",");
+      const x = parseInt(xStr, 10);
+      const y = parseInt(yStr, 10);
+
+      const texture = this.blockTextures.get(blockId);
+      if (!texture) continue;
+
+      const sprite = new Sprite(texture);
+      const { offsetX, offsetY, cellSize } = this.currentGridInfo;
+
+      sprite.x = offsetX + x * cellSize;
+      sprite.y = offsetY + y * cellSize;
+      sprite.width = cellSize;
+      sprite.height = cellSize;
+
+      this.blocksContainer.addChild(sprite);
+      this.cellSprites.set(key, sprite);
+      this.gridData.set(key, blockId);
+    }
+
+    debug("syncFromStore complete, %d cells", this.cellSprites.size);
   }
 }

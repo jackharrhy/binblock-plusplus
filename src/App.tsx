@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { CanvasController } from "./canvas";
 import { BlockPalette } from "./components/BlockPalette";
+import { RightSidebar } from "./components/RightSidebar";
+import { initMenuListeners, cleanupMenuListeners, setCanvasRef } from "./menu";
 import "./App.css";
 
 export function App() {
@@ -12,6 +14,12 @@ export function App() {
     setSelectedBlockId(blockId);
     controllerRef.current?.setSelectedBlock(blockId);
   };
+
+  // Initialize menu listeners
+  useEffect(() => {
+    initMenuListeners();
+    return () => cleanupMenuListeners();
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -25,6 +33,7 @@ export function App() {
         return;
       }
       controllerRef.current = controller;
+      setCanvasRef(controller);
       controller.setOnBlockPicked((blockId) => {
         setSelectedBlockId(blockId);
       });
@@ -33,6 +42,7 @@ export function App() {
     return () => {
       cancelled = true;
       controllerRef.current?.setOnBlockPicked(null);
+      setCanvasRef(null);
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
@@ -56,7 +66,14 @@ export function App() {
         ref={containerRef}
         className="flex-1 h-full min-w-0 overflow-hidden"
       />
-      <aside className="w-[18rem] h-full shrink-0 bg-black/10" />
+      <aside className="w-[18rem] h-full shrink-0 bg-black/10">
+        <RightSidebar
+          onClearGrid={() => controllerRef.current?.clearAllCells()}
+          onResizeGrid={(cols, rows) =>
+            controllerRef.current?.resizeGrid(cols, rows)
+          }
+        />
+      </aside>
     </main>
   );
 }
