@@ -44,6 +44,12 @@ export class CanvasController {
   private cellSprites: Map<string, Sprite> = new Map();
   private selectedBlockId: string | null = null;
 
+  private targetScale = 1;
+  private targetX = 0;
+  private targetY = 0;
+  private isAnimating = false;
+  private readonly ZOOM_LERP_FACTOR = 0.15;
+
   private boundOnWheel: (e: WheelEvent) => void;
   private boundOnKeyDown: (e: KeyboardEvent) => void;
   private boundOnKeyUp: (e: KeyboardEvent) => void;
@@ -140,6 +146,11 @@ export class CanvasController {
       newHeight
     );
 
+    if (this.isAnimating) {
+      this.app.ticker.remove(this.animateZoom, this);
+      this.isAnimating = false;
+    }
+
     if (!this.hasMovedView) {
       debug("resize: resetting to initial view");
       this.drawGrid(this.currentGridInfo.cols, this.currentGridInfo.rows);
@@ -160,6 +171,10 @@ export class CanvasController {
         newCenterX - worldCenterX * this.sceneContainer.scale.x;
       this.sceneContainer.y =
         newCenterY - worldCenterY * this.sceneContainer.scale.y;
+
+      this.targetScale = this.sceneContainer.scale.x;
+      this.targetX = this.sceneContainer.x;
+      this.targetY = this.sceneContainer.y;
     }
 
     this.lastScreenSize = { width: newWidth, height: newHeight };
@@ -242,7 +257,7 @@ export class CanvasController {
     if (!this.isShiftHeld) return;
     event.preventDefault();
 
-    const scaleAmount = 1.1;
+    const scaleAmount = 1.08;
     const direction = event.deltaY < 0 ? 1 : -1;
     const factor = direction > 0 ? scaleAmount : 1 / scaleAmount;
 
@@ -257,10 +272,13 @@ export class CanvasController {
       screenHeight / (this.currentGridInfo.cellSize * MIN_VISIBLE_CELLS);
     const maxScale = Math.min(maxScaleFromWidth, maxScaleFromHeight);
 
-    let newScale = this.sceneContainer.scale.x * factor;
+    const baseScale = this.isAnimating
+      ? this.targetScale
+      : this.sceneContainer.scale.x;
+    let newScale = baseScale * factor;
     newScale = Math.max(minScale, Math.min(maxScale, newScale));
 
-    if (newScale === this.sceneContainer.scale.x) return;
+    if (newScale === this.targetScale && this.isAnimating) return;
 
     const pointerX = event.offsetX;
     const pointerY = event.offsetY;
@@ -270,14 +288,46 @@ export class CanvasController {
       y: (pointerY - this.sceneContainer.y) / this.sceneContainer.scale.y,
     };
 
-    this.sceneContainer.scale.x = newScale;
-    this.sceneContainer.scale.y = newScale;
+    this.targetScale = newScale;
+    this.targetX = pointerX - worldPos.x * newScale;
+    this.targetY = pointerY - worldPos.y * newScale;
 
-    this.sceneContainer.x = pointerX - worldPos.x * this.sceneContainer.scale.x;
-    this.sceneContainer.y = pointerY - worldPos.y * this.sceneContainer.scale.y;
+    if (!this.isAnimating) {
+      this.isAnimating = true;
+      this.app.ticker.add(this.animateZoom, this);
+    }
 
-    debug("zoom: scale=%.3f", newScale);
+    debug("zoom target: scale=%.3f", newScale);
     this.hasMovedView = true;
+  }
+
+  private animateZoom(): void {
+    const currentScale = this.sceneContainer.scale.x;
+    const currentX = this.sceneContainer.x;
+    const currentY = this.sceneContainer.y;
+
+    const newScale =
+      currentScale + (this.targetScale - currentScale) * this.ZOOM_LERP_FACTOR;
+    const newX = currentX + (this.targetX - currentX) * this.ZOOM_LERP_FACTOR;
+    const newY = currentY + (this.targetY - currentY) * this.ZOOM_LERP_FACTOR;
+
+    this.sceneContainer.scale.set(newScale);
+    this.sceneContainer.x = newX;
+    this.sceneContainer.y = newY;
+
+    const scaleDiff = Math.abs(this.targetScale - newScale);
+    const posDiff =
+      Math.abs(this.targetX - newX) + Math.abs(this.targetY - newY);
+
+    if (scaleDiff < 0.0001 && posDiff < 0.1) {
+      this.sceneContainer.scale.set(this.targetScale);
+      this.sceneContainer.x = this.targetX;
+      this.sceneContainer.y = this.targetY;
+
+      this.app.ticker.remove(this.animateZoom, this);
+      this.isAnimating = false;
+      debug("zoom animation complete");
+    }
   }
 
   private screenToGrid(
@@ -458,6 +508,10 @@ export class CanvasController {
 
     this.sceneContainer.x = (screenWidth - scaledWidth) / 2;
     this.sceneContainer.y = (screenHeight - scaledHeight) / 2;
+
+    this.targetScale = scale;
+    this.targetX = this.sceneContainer.x;
+    this.targetY = this.sceneContainer.y;
   }
 
   exportGrid(): GridState {
@@ -508,6 +562,11 @@ export class CanvasController {
 
   destroy(): void {
     debug("destroying canvas");
+
+    if (this.isAnimating) {
+      this.app.ticker.remove(this.animateZoom, this);
+      this.isAnimating = false;
+    }
 
     this.app.canvas.removeEventListener("wheel", this.boundOnWheel);
     window.removeEventListener("keydown", this.boundOnKeyDown);
