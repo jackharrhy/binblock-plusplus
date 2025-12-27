@@ -25,10 +25,14 @@ export function App() {
         return;
       }
       controllerRef.current = controller;
+      controller.setOnBlockPicked((blockId) => {
+        setSelectedBlockId(blockId);
+      });
     });
 
     return () => {
       cancelled = true;
+      controllerRef.current?.setOnBlockPicked(null);
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };

@@ -5,7 +5,6 @@ import {
   FederatedPointerEvent,
   Sprite,
   Texture,
-  Assets,
 } from "pixi.js";
 import createDebug from "debug";
 import { blocks, type GridState } from "./blocks";
@@ -24,7 +23,10 @@ export class CanvasController {
   private isDragging = false;
   private isShiftHeld = false;
   private isPainting = false;
+  private isErasing = false;
   private lastPointerPosition = { x: 0, y: 0 };
+
+  private onBlockPicked: ((blockId: string) => void) | null = null;
 
   private currentGridInfo = {
     width: 0,
@@ -56,6 +58,7 @@ export class CanvasController {
   private boundOnDragStart: (e: FederatedPointerEvent) => void;
   private boundOnDragMove: (e: FederatedPointerEvent) => void;
   private boundOnDragEnd: () => void;
+  private boundOnContextMenu: (e: Event) => void;
 
   private constructor(app: Application) {
     this.app = app;
@@ -70,6 +73,7 @@ export class CanvasController {
     this.boundOnDragStart = this.onDragStart.bind(this);
     this.boundOnDragMove = this.onDragMove.bind(this);
     this.boundOnDragEnd = this.onDragEnd.bind(this);
+    this.boundOnContextMenu = (e: Event) => e.preventDefault();
   }
 
   static async create(container: HTMLElement): Promise<CanvasController> {
@@ -100,7 +104,17 @@ export class CanvasController {
     debug("loading %d block textures", blocks.length);
 
     const loadPromises = blocks.map(async (block) => {
-      const texture = await Assets.load<Texture>(block.url);
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () =>
+          reject(new Error(`Failed to load image: ${block.url}`));
+        img.src = block.url;
+      });
+
+      const texture = Texture.from(img);
       this.blockTextures.set(block.id, texture);
     });
 
@@ -120,6 +134,7 @@ export class CanvasController {
     this.app.canvas.addEventListener("wheel", this.boundOnWheel, {
       passive: false,
     });
+    this.app.canvas.addEventListener("contextmenu", this.boundOnContextMenu);
 
     window.addEventListener("keydown", this.boundOnKeyDown);
     window.addEventListener("keyup", this.boundOnKeyUp);
@@ -146,10 +161,7 @@ export class CanvasController {
       newHeight
     );
 
-    if (this.isAnimating) {
-      this.app.ticker.remove(this.animateZoom, this);
-      this.isAnimating = false;
-    }
+    this.stopAnimation();
 
     if (!this.hasMovedView) {
       debug("resize: resetting to initial view");
@@ -216,15 +228,32 @@ export class CanvasController {
 
   private onDragStart(event: FederatedPointerEvent): void {
     debug(
-      "onDragStart: shift=%s, selectedBlock=%s, pos=(%d,%d)",
+      "onDragStart: shift=%s, button=%d, selectedBlock=%s, pos=(%d,%d)",
       this.isShiftHeld,
+      event.button,
       this.selectedBlockId,
       event.global.x,
       event.global.y
     );
+
+    // Middle-click: pick block from cell
+    if (event.button === 1) {
+      this.pickBlockAtPosition(event.global.x, event.global.y);
+      return;
+    }
+
+    // Right-click: erase (set to 00)
+    if (event.button === 2) {
+      this.isErasing = true;
+      this.eraseAtPosition(event.global.x, event.global.y);
+      return;
+    }
+
+    // Left-click
     if (this.isShiftHeld) {
       this.isDragging = true;
       this.lastPointerPosition = { x: event.global.x, y: event.global.y };
+      this.stopAnimation();
       this.updateCursor();
     } else if (this.selectedBlockId) {
       this.isPainting = true;
@@ -240,8 +269,14 @@ export class CanvasController {
       this.sceneContainer.x += dx;
       this.sceneContainer.y += dy;
 
+      // Keep targets in sync so any future animation starts from current position
+      this.targetX = this.sceneContainer.x;
+      this.targetY = this.sceneContainer.y;
+
       this.lastPointerPosition = { x: event.global.x, y: event.global.y };
       this.hasMovedView = true;
+    } else if (this.isErasing) {
+      this.eraseAtPosition(event.global.x, event.global.y);
     } else if (this.isPainting && this.selectedBlockId) {
       this.paintAtPosition(event.global.x, event.global.y);
     }
@@ -250,6 +285,7 @@ export class CanvasController {
   private onDragEnd(): void {
     this.isDragging = false;
     this.isPainting = false;
+    this.isErasing = false;
     this.updateCursor();
   }
 
@@ -299,6 +335,18 @@ export class CanvasController {
 
     debug("zoom target: scale=%.3f", newScale);
     this.hasMovedView = true;
+  }
+
+  private stopAnimation(): void {
+    if (this.isAnimating) {
+      this.app.ticker.remove(this.animateZoom, this);
+      this.isAnimating = false;
+      // Sync targets to current position
+      this.targetScale = this.sceneContainer.scale.x;
+      this.targetX = this.sceneContainer.x;
+      this.targetY = this.sceneContainer.y;
+      debug("animation stopped");
+    }
   }
 
   private animateZoom(): void {
@@ -372,6 +420,27 @@ export class CanvasController {
     this.fillCell(gridPos.x, gridPos.y, this.selectedBlockId);
   }
 
+  private eraseAtPosition(screenX: number, screenY: number): void {
+    const gridPos = this.screenToGrid(screenX, screenY);
+    if (!gridPos) return;
+
+    this.clearCell(gridPos.x, gridPos.y);
+  }
+
+  private pickBlockAtPosition(screenX: number, screenY: number): void {
+    const gridPos = this.screenToGrid(screenX, screenY);
+    if (!gridPos) return;
+
+    const key = `${gridPos.x},${gridPos.y}`;
+    const blockId = this.gridData.get(key) ?? "00";
+
+    debug("picked block %s from cell %s", blockId, key);
+
+    this.selectedBlockId = blockId;
+    this.updateCursor();
+    this.onBlockPicked?.(blockId);
+  }
+
   fillCell(x: number, y: number, blockId: string): void {
     const key = `${x},${y}`;
     const texture = this.blockTextures.get(blockId);
@@ -401,16 +470,9 @@ export class CanvasController {
   }
 
   clearCell(x: number, y: number): void {
-    const key = `${x},${y}`;
-    const sprite = this.cellSprites.get(key);
-
-    if (sprite) {
-      sprite.destroy();
-      this.cellSprites.delete(key);
-    }
-
-    this.gridData.delete(key);
-    debug("cleared cell %s", key);
+    // Clearing a cell means setting it to the transparent "00" block
+    this.fillCell(x, y, "00");
+    debug("cleared cell %d,%d to 00", x, y);
   }
 
   setSelectedBlock(blockId: string | null): void {
@@ -421,6 +483,10 @@ export class CanvasController {
 
   getSelectedBlock(): string | null {
     return this.selectedBlockId;
+  }
+
+  setOnBlockPicked(callback: ((blockId: string) => void) | null): void {
+    this.onBlockPicked = callback;
   }
 
   drawGrid(cols: number, rows: number): void {
@@ -563,12 +629,10 @@ export class CanvasController {
   destroy(): void {
     debug("destroying canvas");
 
-    if (this.isAnimating) {
-      this.app.ticker.remove(this.animateZoom, this);
-      this.isAnimating = false;
-    }
+    this.stopAnimation();
 
     this.app.canvas.removeEventListener("wheel", this.boundOnWheel);
+    this.app.canvas.removeEventListener("contextmenu", this.boundOnContextMenu);
     window.removeEventListener("keydown", this.boundOnKeyDown);
     window.removeEventListener("keyup", this.boundOnKeyUp);
 
