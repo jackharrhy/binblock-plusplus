@@ -2,22 +2,42 @@ import { useAppStore, type Tool } from "../store/appStore";
 import { useGridStore } from "../store/gridStore";
 import { DiscordExport } from "./DiscordExport";
 
-const TOOLS: { id: Tool; label: string; icon: string }[] = [
-  { id: "pencil", label: "Pencil", icon: "✏️" },
-  { id: "line", label: "Line", icon: "📏" },
-  { id: "rect", label: "Rectangle", icon: "▢" },
-  { id: "rect-filled", label: "Rectangle (Filled)", icon: "■" },
-  { id: "circle", label: "Circle", icon: "○" },
-  { id: "circle-filled", label: "Circle (Filled)", icon: "●" },
-  { id: "fill", label: "Fill", icon: "🪣" },
+const toolModules = import.meta.glob<{ default: string }>(
+  "../icons/tools/*.png",
+  { eager: true }
+);
+
+const toolIcons: Record<string, string> = {
+  pencil: toolModules["../icons/tools/pencil.png"]?.default,
+  line: toolModules["../icons/tools/line.png"]?.default,
+  rect: toolModules["../icons/tools/rectangle.png"]?.default,
+  "rect-filled": toolModules["../icons/tools/rectangle-filled.png"]?.default,
+  circle: toolModules["../icons/tools/circle.png"]?.default,
+  "circle-filled": toolModules["../icons/tools/circle-filled.png"]?.default,
+  fill: toolModules["../icons/tools/fill.png"]?.default,
+};
+
+const TOOLS: { id: Tool; label: string }[] = [
+  { id: "pencil", label: "Pencil" },
+  { id: "line", label: "Line" },
+  { id: "rect", label: "Rectangle" },
+  { id: "rect-filled", label: "Fill Rectangle" },
+  { id: "circle", label: "Circle" },
+  { id: "circle-filled", label: "Fill Circle" },
+  { id: "fill", label: "Flood Fill" },
 ];
 
 interface RightSidebarProps {
   onClearGrid: () => void;
   onResizeGrid: (cols: number, rows: number) => void;
+  onExportPng: () => void;
 }
 
-export function RightSidebar({ onClearGrid, onResizeGrid }: RightSidebarProps) {
+export function RightSidebar({
+  onClearGrid,
+  onResizeGrid,
+  onExportPng,
+}: RightSidebarProps) {
   const { currentTool, setTool, gridCols, gridRows, setGridSize } =
     useAppStore();
 
@@ -36,19 +56,23 @@ export function RightSidebar({ onClearGrid, onResizeGrid }: RightSidebarProps) {
     <div className="flex flex-col h-full overflow-hidden">
       <section className="p-3">
         <h3 className="text-xs font-medium text-black/50 mb-2">Tools</h3>
-        <div className="grid grid-cols-4 gap-1.5">
+        <div className="grid grid-cols-2 gap-1">
           {TOOLS.map((tool) => (
             <button
               key={tool.id}
               onClick={() => setTool(tool.id)}
-              title={tool.label}
-              className={`aspect-square flex items-center justify-center text-xl rounded transition-colors ${
+              className={`flex items-center gap-1.5 px-2 py-1.5 rounded text-xs transition-colors ${
                 currentTool === tool.id
-                  ? "bg-black text-white"
+                  ? "bg-black/10"
                   : "bg-black/5 hover:bg-black/10"
               }`}
             >
-              {tool.icon}
+              <img
+                src={toolIcons[tool.id]}
+                alt={tool.label}
+                className="w-4 h-4 object-contain"
+              />
+              <span className="truncate">{tool.label}</span>
             </button>
           ))}
         </div>
@@ -91,6 +115,17 @@ export function RightSidebar({ onClearGrid, onResizeGrid }: RightSidebarProps) {
           className="w-full mt-3 py-1.5 text-xs rounded transition-colors bg-red-500/10 text-red-600 hover:bg-red-500/20 active:bg-red-500/30"
         >
           Clear Grid
+        </button>
+      </section>
+
+      <hr className="border-black/10" />
+
+      <section className="p-3">
+        <button
+          onClick={onExportPng}
+          className="w-full py-2 text-xs font-medium rounded transition-colors bg-blue-200 text-blue-800 hover:bg-blue-300 active:bg-blue-300"
+        >
+          Export as PNG
         </button>
       </section>
 

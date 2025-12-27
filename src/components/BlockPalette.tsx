@@ -5,6 +5,7 @@ import {
   expandBlockGroup,
   getGroupedBlockIds,
 } from "../blocks/groups";
+import { cn } from "../lib/utils";
 
 interface BlockPaletteProps {
   selectedBlockId: string | null;
@@ -49,14 +50,15 @@ export function BlockPalette({ selectedBlockId, onSelect }: BlockPaletteProps) {
   }, [blockMap]);
 
   return (
-    <div className="h-full flex flex-col p-2">
-      <div className="flex-1 overflow-y-auto space-y-3">
+    <div className="h-full flex flex-col">
+      <div className="flex-1 overflow-y-auto space-y-3 p-4">
         {groups.map((group) => (
           <div
             key={group.key}
-            className={`rounded-lg ${
-              group.isUngrouped ? "bg-red-500/20 p-1.5" : ""
-            }`}
+            className={cn(
+              "rounded-lg",
+              group.isUngrouped && "bg-red-500/20 p-1.5"
+            )}
           >
             <div className="grid grid-cols-4">
               {group.blockIds.map((id) => {
@@ -66,20 +68,21 @@ export function BlockPalette({ selectedBlockId, onSelect }: BlockPaletteProps) {
                   <button
                     key={block.id}
                     onClick={() => onSelect(block.id)}
-                    className={`
-                      aspect-square rounded transition-all
-                      ${
-                        selectedBlockId === block.id
-                          ? "bg-blue-500/30 ring-2 ring-blue-500"
-                          : "hover:bg-white/20"
-                      }
-                    `}
+                    className={cn(
+                      "aspect-square rounded transition-all duration-100",
+                      selectedBlockId === block.id
+                        ? "relative z-10 scale-110 bg-blue-500/30 ring-2 ring-blue-500/50"
+                        : "hover:bg-white/20"
+                    )}
                   >
                     <img
                       src={block.url}
                       alt={`Block ${block.id}`}
                       title={`:${block.id}:`}
-                      className="w-full h-full object-contain"
+                      className={cn(
+                        "w-full h-full object-contain",
+                        block.id === "00" && "border-2 border-black"
+                      )}
                       draggable={false}
                     />
                   </button>

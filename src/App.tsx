@@ -72,6 +72,7 @@ export function App() {
           onResizeGrid={(cols, rows) =>
             controllerRef.current?.resizeGrid(cols, rows)
           }
+          onExportPng={() => controllerRef.current?.exportAsPng()}
         />
       </aside>
     </main>

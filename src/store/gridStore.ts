@@ -3,6 +3,8 @@ import { create } from "zustand";
 const HISTORY_LIMIT = 50;
 
 type GridSnapshot = {
+  cols: number;
+  rows: number;
   cells: Record<string, string>;
 };
 
@@ -60,9 +62,12 @@ export const useGridStore = create<GridState>((set, get) => ({
 
   pushHistory: () =>
     set((state) => {
-      const snapshot: GridSnapshot = { cells: { ...state.cells } };
+      const snapshot: GridSnapshot = {
+        cols: state.cols,
+        rows: state.rows,
+        cells: { ...state.cells },
+      };
       const newPast = [...state.past, snapshot];
-      // Limit history size
       if (newPast.length > HISTORY_LIMIT) {
         newPast.shift();
       }
@@ -75,9 +80,15 @@ export const useGridStore = create<GridState>((set, get) => ({
 
     const newPast = [...state.past];
     const previous = newPast.pop()!;
-    const currentSnapshot: GridSnapshot = { cells: { ...state.cells } };
+    const currentSnapshot: GridSnapshot = {
+      cols: state.cols,
+      rows: state.rows,
+      cells: { ...state.cells },
+    };
 
     set({
+      cols: previous.cols,
+      rows: previous.rows,
       cells: previous.cells,
       past: newPast,
       future: [currentSnapshot, ...state.future],
@@ -90,9 +101,15 @@ export const useGridStore = create<GridState>((set, get) => ({
 
     const newFuture = [...state.future];
     const next = newFuture.shift()!;
-    const currentSnapshot: GridSnapshot = { cells: { ...state.cells } };
+    const currentSnapshot: GridSnapshot = {
+      cols: state.cols,
+      rows: state.rows,
+      cells: { ...state.cells },
+    };
 
     set({
+      cols: next.cols,
+      rows: next.rows,
       cells: next.cells,
       past: [...state.past, currentSnapshot],
       future: newFuture,

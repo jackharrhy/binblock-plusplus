@@ -7,14 +7,29 @@ import {
   Texture,
 } from "pixi.js";
 import createDebug from "debug";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeFile } from "@tauri-apps/plugin-fs";
 import { blocks, type GridState } from "./blocks";
 import { useGridStore } from "./store/gridStore";
 import { useAppStore } from "./store/appStore";
+const cursorModules = import.meta.glob<{ default: string }>(
+  "./icons/cursors/*.png",
+  { eager: true }
+);
+const cursorGrab = cursorModules["./icons/cursors/grab.png"].default;
+const cursorPoint = cursorModules["./icons/cursors/point.png"].default;
 
 const debug = createDebug("binblock:canvas");
 
 const MIN_GRID_HEIGHT_RATIO = 0.45;
 const MIN_VISIBLE_CELLS = 4;
+const GRID_STROKE_WIDTH = 1.5;
+const MIN_STROKE_WIDTH = 0.5;
+const MAX_STROKE_WIDTH = 2;
+const GRID_ALPHA = 0.15;
+const IS_WEBKIT =
+  /AppleWebKit/i.test(navigator.userAgent) &&
+  !/Chrome|Chromium/i.test(navigator.userAgent);
 
 export class CanvasController {
   private app: Application;
@@ -23,13 +38,16 @@ export class CanvasController {
   private blocksContainer: Container;
 
   private isDragging = false;
-  private isShiftHeld = false;
+  private isSpaceHeld = false;
   private isPainting = false;
   private isErasing = false;
   private isDrawingShape = false;
   private lastPointerPosition = { x: 0, y: 0 };
   private shapeStartCell: { x: number; y: number } | null = null;
-  private previewGraphics: Graphics | null = null;
+  private previewContainer: Container | null = null;
+
+  private fakeCursor: Sprite | null = null;
+  private fakeCursorType: "grab" | "grabbing" | null = null;
 
   private onBlockPicked: ((blockId: string) => void) | null = null;
 
@@ -47,6 +65,7 @@ export class CanvasController {
   private resizeObserver: ResizeObserver | null = null;
 
   private blockTextures: Map<string, Texture> = new Map();
+  private cursorTextures: Map<string, Texture> = new Map();
   private gridData: Map<string, string> = new Map();
   private cellSprites: Map<string, Sprite> = new Map();
   private selectedBlockId: string | null = null;
@@ -125,6 +144,29 @@ export class CanvasController {
 
     await Promise.all(loadPromises);
     debug("loaded %d block textures", this.blockTextures.size);
+
+    const cursors = [
+      { id: "grab", url: cursorGrab },
+      { id: "point", url: cursorPoint },
+    ];
+
+    const cursorPromises = cursors.map(async (cursor) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () =>
+          reject(new Error(`Failed to load cursor: ${cursor.url}`));
+        img.src = cursor.url;
+      });
+
+      const texture = Texture.from(img);
+      this.cursorTextures.set(cursor.id, texture);
+    });
+
+    await Promise.all(cursorPromises);
+    debug("loaded %d cursor textures", this.cursorTextures.size);
   }
 
   private setupPanZoom(container: HTMLElement): void {
@@ -199,15 +241,18 @@ export class CanvasController {
   }
 
   private onKeyDown(event: KeyboardEvent): void {
-    if (event.key === "Shift" && !this.isShiftHeld) {
-      this.isShiftHeld = true;
-      this.updateCursor();
+    if (event.key === " ") {
+      event.preventDefault();
+      if (!this.isSpaceHeld) {
+        this.isSpaceHeld = true;
+        this.updateCursor();
+      }
     }
   }
 
   private onKeyUp(event: KeyboardEvent): void {
-    if (event.key === "Shift") {
-      this.isShiftHeld = false;
+    if (event.key === " ") {
+      this.isSpaceHeld = false;
       this.isDragging = false;
       this.updateCursor();
     }
@@ -215,7 +260,7 @@ export class CanvasController {
 
   private updateCursor(): void {
     let cursor: string;
-    if (this.isShiftHeld) {
+    if (this.isSpaceHeld) {
       cursor = this.isDragging ? "grabbing" : "grab";
     } else if (this.selectedBlockId) {
       cursor = "crosshair";
@@ -223,19 +268,76 @@ export class CanvasController {
       cursor = "default";
     }
     debug(
-      "updateCursor: %s (shift=%s, selected=%s)",
+      "updateCursor: %s (space=%s, selected=%s)",
       cursor,
-      this.isShiftHeld,
+      this.isSpaceHeld,
       this.selectedBlockId
     );
-    this.app.canvas.style.cursor = cursor;
+
+    if (IS_WEBKIT && (cursor === "grab" || cursor === "grabbing")) {
+      this.app.canvas.style.cursor = "none";
+      this.showFakeCursor(cursor);
+    } else {
+      const wasShowingFakeCursor = this.fakeCursor !== null;
+      this.hideFakeCursor();
+      this.app.canvas.style.cursor = cursor;
+
+      if (wasShowingFakeCursor && IS_WEBKIT) {
+        const evt = new MouseEvent("mousemove", {
+          view: window,
+          bubbles: true,
+          cancelable: true,
+          clientX: this.lastPointerPosition.x,
+          clientY: this.lastPointerPosition.y,
+        });
+        this.app.canvas.dispatchEvent(evt);
+      }
+    }
+  }
+
+  private showFakeCursor(type: "grab" | "grabbing"): void {
+    if (this.fakeCursorType === type && this.fakeCursor) {
+      return;
+    }
+
+    this.hideFakeCursor();
+
+    const textureId = type === "grabbing" ? "grab" : "point";
+    const texture = this.cursorTextures.get(textureId);
+    if (!texture) return;
+
+    const sprite = new Sprite(texture);
+
+    sprite.anchor.set(0, 0);
+    sprite.scale.set(0.3);
+    sprite.x = this.lastPointerPosition.x;
+    sprite.y = this.lastPointerPosition.y;
+
+    this.fakeCursor = sprite;
+    this.fakeCursorType = type;
+    this.app.stage.addChild(sprite);
+  }
+
+  private hideFakeCursor(): void {
+    if (this.fakeCursor) {
+      this.fakeCursor.destroy();
+      this.fakeCursor = null;
+      this.fakeCursorType = null;
+    }
+  }
+
+  private updateFakeCursorPosition(x: number, y: number): void {
+    if (this.fakeCursor) {
+      this.fakeCursor.x = x;
+      this.fakeCursor.y = y;
+    }
   }
 
   private onDragStart(event: FederatedPointerEvent): void {
     const tool = useAppStore.getState().currentTool;
     debug(
       "onDragStart: shift=%s, button=%d, tool=%s, selectedBlock=%s, pos=(%d,%d)",
-      this.isShiftHeld,
+      this.isSpaceHeld,
       event.button,
       tool,
       this.selectedBlockId,
@@ -249,14 +351,13 @@ export class CanvasController {
     }
 
     if (event.button === 2) {
-      // Push history before erasing
       useGridStore.getState().pushHistory();
       this.isErasing = true;
       this.eraseAtPosition(event.global.x, event.global.y);
       return;
     }
 
-    if (this.isShiftHeld) {
+    if (this.isSpaceHeld) {
       this.isDragging = true;
       this.lastPointerPosition = { x: event.global.x, y: event.global.y };
       this.stopAnimation();
@@ -264,7 +365,6 @@ export class CanvasController {
     } else if (this.selectedBlockId) {
       const gridPos = this.screenToGrid(event.global.x, event.global.y);
 
-      // Push history before any drawing operation
       useGridStore.getState().pushHistory();
 
       if (tool === "pencil") {
@@ -275,44 +375,46 @@ export class CanvasController {
           this.floodFill(gridPos.x, gridPos.y, this.selectedBlockId);
         }
       } else {
-        // Shape tools: line, rect, circle
         if (gridPos) {
           this.isDrawingShape = true;
           this.shapeStartCell = gridPos;
-          this.createPreviewGraphics();
+          this.createPreviewContainer();
         }
       }
     }
   }
 
   private onDragMove(event: FederatedPointerEvent): void {
+    const mouseX = event.global.x;
+    const mouseY = event.global.y;
+
     if (this.isDragging) {
-      const dx = event.global.x - this.lastPointerPosition.x;
-      const dy = event.global.y - this.lastPointerPosition.y;
+      const dx = mouseX - this.lastPointerPosition.x;
+      const dy = mouseY - this.lastPointerPosition.y;
 
       this.sceneContainer.x += dx;
       this.sceneContainer.y += dy;
 
       this.targetX = this.sceneContainer.x;
       this.targetY = this.sceneContainer.y;
-
-      this.lastPointerPosition = { x: event.global.x, y: event.global.y };
       this.hasMovedView = true;
     } else if (this.isErasing) {
-      this.eraseAtPosition(event.global.x, event.global.y);
+      this.eraseAtPosition(mouseX, mouseY);
     } else if (this.isPainting && this.selectedBlockId) {
-      this.paintAtPosition(event.global.x, event.global.y);
+      this.paintAtPosition(mouseX, mouseY);
     } else if (this.isDrawingShape && this.shapeStartCell) {
-      const gridPos = this.screenToGrid(event.global.x, event.global.y);
+      const gridPos = this.screenToGrid(mouseX, mouseY);
       if (gridPos) {
         this.updateShapePreview(this.shapeStartCell, gridPos);
       }
     }
+
+    this.lastPointerPosition = { x: mouseX, y: mouseY };
+    this.updateFakeCursorPosition(mouseX, mouseY);
   }
 
   private onDragEnd(): void {
     if (this.isDrawingShape && this.shapeStartCell && this.selectedBlockId) {
-      // Finalize the shape by getting the last preview position
       this.finalizeShape();
     }
 
@@ -321,12 +423,12 @@ export class CanvasController {
     this.isErasing = false;
     this.isDrawingShape = false;
     this.shapeStartCell = null;
-    this.clearPreviewGraphics();
+    this.clearPreviewContainer();
     this.updateCursor();
   }
 
   private onWheel(event: WheelEvent): void {
-    if (!this.isShiftHeld) return;
+    if (!this.isSpaceHeld) return;
     event.preventDefault();
 
     const scaleAmount = 1.08;
@@ -398,6 +500,8 @@ export class CanvasController {
     this.sceneContainer.x = newX;
     this.sceneContainer.y = newY;
 
+    this.updateGridStroke();
+
     const scaleDiff = Math.abs(this.targetScale - newScale);
     const posDiff =
       Math.abs(this.targetX - newX) + Math.abs(this.targetY - newY);
@@ -407,6 +511,7 @@ export class CanvasController {
       this.sceneContainer.x = this.targetX;
       this.sceneContainer.y = this.targetY;
 
+      this.updateGridStroke();
       this.app.ticker.remove(this.animateZoom, this);
       this.isAnimating = false;
       debug("zoom animation complete");
@@ -476,20 +581,18 @@ export class CanvasController {
     this.onBlockPicked?.(blockId);
   }
 
-  // ===== Shape Tool Helpers =====
-
   private lastPreviewEnd: { x: number; y: number } | null = null;
 
-  private createPreviewGraphics(): void {
-    this.clearPreviewGraphics();
-    this.previewGraphics = new Graphics();
-    this.sceneContainer.addChild(this.previewGraphics);
+  private createPreviewContainer(): void {
+    this.clearPreviewContainer();
+    this.previewContainer = new Container();
+    this.sceneContainer.addChild(this.previewContainer);
   }
 
-  private clearPreviewGraphics(): void {
-    if (this.previewGraphics) {
-      this.previewGraphics.destroy();
-      this.previewGraphics = null;
+  private clearPreviewContainer(): void {
+    if (this.previewContainer) {
+      this.previewContainer.destroy({ children: true });
+      this.previewContainer = null;
     }
     this.lastPreviewEnd = null;
   }
@@ -498,22 +601,26 @@ export class CanvasController {
     start: { x: number; y: number },
     end: { x: number; y: number }
   ): void {
-    if (!this.previewGraphics) return;
+    if (!this.previewContainer || !this.selectedBlockId) return;
     this.lastPreviewEnd = end;
 
-    this.previewGraphics.clear();
+    this.previewContainer.removeChildren();
+
+    const texture = this.blockTextures.get(this.selectedBlockId);
+    if (!texture) return;
+
     const cells = this.getShapeCells(start, end);
     const { offsetX, offsetY, cellSize } = this.currentGridInfo;
 
     for (const cell of cells) {
-      this.previewGraphics.rect(
-        offsetX + cell.x * cellSize + 2,
-        offsetY + cell.y * cellSize + 2,
-        cellSize - 4,
-        cellSize - 4
-      );
+      const sprite = new Sprite(texture);
+      sprite.x = offsetX + cell.x * cellSize;
+      sprite.y = offsetY + cell.y * cellSize;
+      sprite.width = cellSize;
+      sprite.height = cellSize;
+      sprite.alpha = 0.5;
+      this.previewContainer.addChild(sprite);
     }
-    this.previewGraphics.fill({ color: 0x000000, alpha: 0.2 });
   }
 
   private finalizeShape(): void {
@@ -554,7 +661,6 @@ export class CanvasController {
     x1: number,
     y1: number
   ): { x: number; y: number }[] {
-    // Bresenham's line algorithm
     const cells: { x: number; y: number }[] = [];
     const dx = Math.abs(x1 - x0);
     const dy = Math.abs(y1 - y0);
@@ -618,90 +724,43 @@ export class CanvasController {
     const minY = Math.min(y0, y1);
     const maxY = Math.max(y0, y1);
 
-    const width = maxX - minX;
-    const height = maxY - minY;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
 
-    const cx = minX + width / 2;
-    const cy = minY + height / 2;
-
-    const a = Math.floor(width / 2);
-    const b = Math.floor(height / 2);
-
-    if (a === 0 && b === 0) {
-      const cellX = Math.round(cx);
-      const cellY = Math.round(cy);
-      return this.isInGrid(cellX, cellY) ? [{ x: cellX, y: cellY }] : [];
-    }
+    const a = (maxX - minX) / 2 + 0.5;
+    const b = (maxY - minY) / 2 + 0.5;
 
     const cells: { x: number; y: number }[] = [];
-    const seen = new Set<string>();
 
-    const addCell = (x: number, y: number) => {
-      const key = `${x},${y}`;
-      if (!seen.has(key) && this.isInGrid(x, y)) {
-        seen.add(key);
-        cells.push({ x, y });
-      }
+    const isInside = (x: number, y: number): boolean => {
+      const dx = x - cx;
+      const dy = y - cy;
+      return (dx * dx) / (a * a) + (dy * dy) / (b * b) <= 1;
     };
 
-    const plotEllipsePoints = (
-      xcenter: number,
-      ycenter: number,
-      x: number,
-      y: number
-    ) => {
-      if (filled) {
-        for (
-          let px = Math.round(xcenter - x);
-          px <= Math.round(xcenter + x);
-          px++
-        ) {
-          addCell(px, Math.round(ycenter + y));
-          addCell(px, Math.round(ycenter - y));
+    const isOnBoundary = (x: number, y: number): boolean => {
+      if (!isInside(x, y)) return false;
+      return (
+        !isInside(x - 1, y) ||
+        !isInside(x + 1, y) ||
+        !isInside(x, y - 1) ||
+        !isInside(x, y + 1)
+      );
+    };
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        if (!this.isInGrid(x, y)) continue;
+
+        if (filled) {
+          if (isInside(x, y)) {
+            cells.push({ x, y });
+          }
+        } else {
+          if (isOnBoundary(x, y)) {
+            cells.push({ x, y });
+          }
         }
-      } else {
-        addCell(Math.round(xcenter + x), Math.round(ycenter + y));
-        addCell(Math.round(xcenter - x), Math.round(ycenter + y));
-        addCell(Math.round(xcenter + x), Math.round(ycenter - y));
-        addCell(Math.round(xcenter - x), Math.round(ycenter - y));
-      }
-    };
-
-    const a2 = a * a;
-    const b2 = b * b;
-    const twoA2 = 2 * a2;
-    const twoB2 = 2 * b2;
-
-    let x = 0;
-    let y = b;
-    let px = 0;
-    let py = twoA2 * y;
-
-    let p1 = b2 - a2 * b + 0.25 * a2;
-    while (px < py) {
-      plotEllipsePoints(cx, cy, x, y);
-      x++;
-      px += twoB2;
-      if (p1 < 0) {
-        p1 += b2 + px;
-      } else {
-        y--;
-        py -= twoA2;
-        p1 += b2 + px - py;
-      }
-    }
-
-    let p2 = b2 * (x + 0.5) * (x + 0.5) + a2 * (y - 1) * (y - 1) - a2 * b2;
-    while (y >= 0) {
-      plotEllipsePoints(cx, cy, x, y);
-      y--;
-      py -= twoA2;
-      if (p2 > 0) {
-        p2 += a2 - py;
-      } else {
-        x++;
-        px += twoB2;
-        p2 += a2 - py + px;
       }
     }
 
@@ -830,20 +889,7 @@ export class CanvasController {
       useGridStore.getState().clearGrid(cols, rows);
     }
 
-    for (let i = 0; i <= cols; i++) {
-      const x = offsetX + i * cellSize;
-      this.gridGraphics.moveTo(x, offsetY);
-      this.gridGraphics.lineTo(x, offsetY + gridHeight);
-    }
-
-    for (let j = 0; j <= rows; j++) {
-      const y = offsetY + j * cellSize;
-      this.gridGraphics.moveTo(offsetX, y);
-      this.gridGraphics.lineTo(offsetX + gridWidth, y);
-    }
-
-    this.gridGraphics.stroke({ width: 2, color: 0x000000, alpha: 0.15 });
-
+    this.updateGridStroke();
     this.repositionSprites();
   }
 
@@ -860,6 +906,41 @@ export class CanvasController {
       sprite.width = cellSize;
       sprite.height = cellSize;
     }
+  }
+
+  private updateGridStroke(): void {
+    if (!this.gridGraphics) return;
+
+    const scale = this.sceneContainer.scale.x;
+    const adjustedWidth = Math.min(
+      MAX_STROKE_WIDTH,
+      Math.max(MIN_STROKE_WIDTH, GRID_STROKE_WIDTH / scale)
+    );
+
+    this.gridGraphics.clear();
+
+    const { offsetX, offsetY, cellSize, cols, rows } = this.currentGridInfo;
+    const gridWidth = cellSize * cols;
+    const gridHeight = cellSize * rows;
+
+    for (let i = 0; i <= cols; i++) {
+      const x = offsetX + i * cellSize;
+      this.gridGraphics.moveTo(x, offsetY);
+      this.gridGraphics.lineTo(x, offsetY + gridHeight);
+    }
+
+    for (let j = 0; j <= rows; j++) {
+      const y = offsetY + j * cellSize;
+      this.gridGraphics.moveTo(offsetX, y);
+      this.gridGraphics.lineTo(offsetX + gridWidth, y);
+    }
+
+    this.gridGraphics.stroke({
+      width: adjustedWidth,
+      color: 0x000000,
+      alpha: 1,
+    });
+    this.gridGraphics.alpha = GRID_ALPHA;
   }
 
   private setInitialView(): void {
@@ -889,6 +970,8 @@ export class CanvasController {
     this.targetScale = scale;
     this.targetX = this.sceneContainer.x;
     this.targetY = this.sceneContainer.y;
+
+    this.updateGridStroke();
   }
 
   exportGrid(): GridState {
@@ -943,6 +1026,7 @@ export class CanvasController {
     debug("destroying canvas");
 
     this.stopAnimation();
+    this.hideFakeCursor();
 
     this.app.canvas.removeEventListener("wheel", this.boundOnWheel);
     this.app.canvas.removeEventListener("contextmenu", this.boundOnContextMenu);
@@ -975,6 +1059,9 @@ export class CanvasController {
     const oldCols = this.currentGridInfo.cols;
     const oldRows = this.currentGridInfo.rows;
 
+    if (newCols === oldCols && newRows === oldRows) return;
+
+    useGridStore.getState().pushHistory();
     debug("resizeGrid: %dx%d -> %dx%d", oldCols, oldRows, newCols, newRows);
 
     const savedCells = new Map(this.gridData);
@@ -1072,7 +1159,16 @@ export class CanvasController {
   syncFromStore(): void {
     debug("syncFromStore");
 
-    const { cells } = useGridStore.getState();
+    const { cols, rows, cells } = useGridStore.getState();
+
+    const dimensionsChanged =
+      cols !== this.currentGridInfo.cols || rows !== this.currentGridInfo.rows;
+
+    if (dimensionsChanged) {
+      this.drawGrid(cols, rows);
+      this.setInitialView();
+      this.hasMovedView = false;
+    }
 
     for (const sprite of this.cellSprites.values()) {
       sprite.destroy();
@@ -1103,4 +1199,83 @@ export class CanvasController {
 
     debug("syncFromStore complete, %d cells", this.cellSprites.size);
   }
+
+  async exportAsPng(): Promise<void> {
+    const EXPORT_CELL_SIZE = 100;
+    const { cols, rows } = this.currentGridInfo;
+
+    debug(
+      "exportAsPng: %dx%d grid, %dpx per cell",
+      cols,
+      rows,
+      EXPORT_CELL_SIZE
+    );
+
+    const canvas = document.createElement("canvas");
+    canvas.width = cols * EXPORT_CELL_SIZE;
+    canvas.height = rows * EXPORT_CELL_SIZE;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Failed to create 2D context for export");
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const key = `${x},${y}`;
+        const blockId = this.gridData.get(key) ?? "00";
+        const texture = this.blockTextures.get(blockId);
+
+        if (texture && texture.source?.resource) {
+          const resource = texture.source.resource;
+
+          if (
+            resource instanceof HTMLImageElement ||
+            resource instanceof ImageBitmap
+          ) {
+            ctx.drawImage(
+              resource,
+              x * EXPORT_CELL_SIZE,
+              y * EXPORT_CELL_SIZE,
+              EXPORT_CELL_SIZE,
+              EXPORT_CELL_SIZE
+            );
+          }
+        }
+      }
+    }
+
+    const dataUrl = canvas.toDataURL("image/png");
+    const base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const filePath = await save({
+      defaultPath: `binblock-${cols}x${rows}.png`,
+      filters: [
+        {
+          name: "PNG Image",
+          extensions: ["png"],
+        },
+      ],
+    });
+
+    if (!filePath) {
+      debug("exportAsPng: user cancelled save dialog");
+      return;
+    }
+
+    await writeFile(filePath, bytes);
+    debug("exportAsPng: saved to %s", filePath);
+  }
+}
+
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    window.location.reload();
+  });
 }
