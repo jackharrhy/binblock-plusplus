@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { DEFAULT_BLOCK_ID } from "../blocks";
 
 const HISTORY_LIMIT = 50;
 
@@ -122,8 +123,8 @@ export const useGridStore = create<GridState>((set, get) => ({
 
 /**
  * Convert the current grid state to Discord emoji text format.
- * Each cell becomes :XX: where XX is the two-digit block ID.
- * Empty cells default to :00:.
+ * Each cell becomes :blockId: using the block's string ID.
+ * Empty cells default to the DEFAULT_BLOCK_ID.
  */
 export function toDiscordText(
   cols: number,
@@ -135,8 +136,8 @@ export function toDiscordText(
   for (let y = 0; y < rows; y++) {
     let row = "";
     for (let x = 0; x < cols; x++) {
-      const blockId = cells[`${x},${y}`] ?? "00";
-      row += `:${blockId.padStart(2, "0")}:`;
+      const blockId = cells[`${x},${y}`] ?? DEFAULT_BLOCK_ID;
+      row += `:${blockId}:`;
     }
     lines.push(row);
   }

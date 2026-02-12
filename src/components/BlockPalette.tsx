@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { blocks } from "../blocks";
+import { blocks, DEFAULT_BLOCK_ID } from "../blocks";
 import {
   blockGroups,
   expandBlockGroup,
@@ -81,7 +81,8 @@ export function BlockPalette({ selectedBlockId, onSelect }: BlockPaletteProps) {
                       title={`:${block.id}:`}
                       className={cn(
                         "w-full h-full object-contain",
-                        block.id === "00" && "border-2 border-black"
+                        block.id === DEFAULT_BLOCK_ID &&
+                          "border-2 border-black"
                       )}
                       draggable={false}
                     />

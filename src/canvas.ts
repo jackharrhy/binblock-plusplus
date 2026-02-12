@@ -9,7 +9,7 @@ import {
 import createDebug from "debug";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { blocks, type GridState } from "./blocks";
+import { blocks, DEFAULT_BLOCK_ID, type GridState } from "./blocks";
 import { useGridStore } from "./store/gridStore";
 import { useAppStore } from "./store/appStore";
 const cursorModules = import.meta.glob<{ default: string }>(
@@ -572,7 +572,7 @@ export class CanvasController {
     if (!gridPos) return;
 
     const key = `${gridPos.x},${gridPos.y}`;
-    const blockId = this.gridData.get(key) ?? "00";
+    const blockId = this.gridData.get(key) ?? DEFAULT_BLOCK_ID;
 
     debug("picked block %s from cell %s", blockId, key);
 
@@ -768,7 +768,8 @@ export class CanvasController {
   }
 
   private floodFill(startX: number, startY: number, fillBlockId: string): void {
-    const targetBlockId = this.gridData.get(`${startX},${startY}`) ?? "00";
+    const targetBlockId =
+      this.gridData.get(`${startX},${startY}`) ?? DEFAULT_BLOCK_ID;
 
     if (targetBlockId === fillBlockId) return;
 
@@ -782,7 +783,7 @@ export class CanvasController {
       if (visited.has(key) || !this.isInGrid(x, y)) continue;
       visited.add(key);
 
-      const currentBlockId = this.gridData.get(key) ?? "00";
+      const currentBlockId = this.gridData.get(key) ?? DEFAULT_BLOCK_ID;
       if (currentBlockId !== targetBlockId) continue;
 
       this.fillCell(x, y, fillBlockId);
@@ -834,8 +835,33 @@ export class CanvasController {
   }
 
   clearCell(x: number, y: number): void {
-    this.fillCell(x, y, "00");
-    debug("cleared cell %d,%d to 00", x, y);
+    this.fillCell(x, y, DEFAULT_BLOCK_ID);
+    debug("cleared cell %d,%d to %s", x, y, DEFAULT_BLOCK_ID);
+  }
+
+  private fillEmptyCells(): void {
+    const { cols, rows, offsetX, offsetY, cellSize } = this.currentGridInfo;
+    const texture = this.blockTextures.get(DEFAULT_BLOCK_ID);
+    if (!texture) return;
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const key = `${x},${y}`;
+        if (this.cellSprites.has(key)) continue;
+
+        const sprite = new Sprite(texture);
+        sprite.x = offsetX + x * cellSize;
+        sprite.y = offsetY + y * cellSize;
+        sprite.width = cellSize;
+        sprite.height = cellSize;
+
+        this.blocksContainer.addChild(sprite);
+        this.cellSprites.set(key, sprite);
+        this.gridData.set(key, DEFAULT_BLOCK_ID);
+      }
+    }
+
+    debug("filled empty cells with default block");
   }
 
   setSelectedBlock(blockId: string | null): void {
@@ -891,6 +917,7 @@ export class CanvasController {
 
     this.updateGridStroke();
     this.repositionSprites();
+    this.fillEmptyCells();
   }
 
   private repositionSprites(): void {
@@ -1014,6 +1041,8 @@ export class CanvasController {
       }
     }
 
+    this.fillEmptyCells();
+
     debug(
       "imported grid: %dx%d with %d cells",
       state.cols,
@@ -1078,7 +1107,7 @@ export class CanvasController {
         let rowEmpty = true;
         for (let x = 0; x < oldCols; x++) {
           const blockId = savedCells.get(`${x},${y}`);
-          if (blockId && blockId !== "00") {
+          if (blockId && blockId !== DEFAULT_BLOCK_ID) {
             rowEmpty = false;
             break;
           }
@@ -1098,7 +1127,7 @@ export class CanvasController {
         let colEmpty = true;
         for (let y = 0; y < oldRows; y++) {
           const blockId = savedCells.get(`${x},${y}`);
-          if (blockId && blockId !== "00") {
+          if (blockId && blockId !== DEFAULT_BLOCK_ID) {
             colEmpty = false;
             break;
           }
@@ -1153,6 +1182,7 @@ export class CanvasController {
       .getState()
       .clearGrid(this.currentGridInfo.cols, this.currentGridInfo.rows);
 
+    this.fillEmptyCells();
     debug("cleared all cells");
   }
 
@@ -1197,6 +1227,7 @@ export class CanvasController {
       this.gridData.set(key, blockId);
     }
 
+    this.fillEmptyCells();
     debug("syncFromStore complete, %d cells", this.cellSprites.size);
   }
 
@@ -1224,7 +1255,7 @@ export class CanvasController {
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
         const key = `${x},${y}`;
-        const blockId = this.gridData.get(key) ?? "00";
+        const blockId = this.gridData.get(key) ?? DEFAULT_BLOCK_ID;
         const texture = this.blockTextures.get(blockId);
 
         if (texture && texture.source?.resource) {
